@@ -1,0 +1,5 @@
+{
+  "name": "Flask Supabase Game Backend",
+  "description": "A modular Flask backend using Supabase PostgreSQL, featuring JWT auth, game server registry, and student progress tracking.",
+  "requestFramePermissions": []
+}
