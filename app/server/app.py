@@ -5,7 +5,7 @@ from app.server.routes.appRoutes import app_bp
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 def create_app():
     app = Flask(__name__)

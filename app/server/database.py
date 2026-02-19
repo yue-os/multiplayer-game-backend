@@ -1,6 +1,7 @@
 import os
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.exc import OperationalError
 
 class Base(DeclarativeBase):
     pass
@@ -25,13 +26,20 @@ def init_db(app):
         # Explicitly import models to ensure they are registered with SQLAlchemy 
         # before we attempt to create the tables.
         from app.server.models import user
-        
-        # Create tables if they don't exist
-        db.create_all()
-        
-        # Import seed function inside the context/function to avoid circular imports 
+
         try:
-            from app.server.seed import seed_database
-            seed_database()
-        except Exception as e:
-            print(f"Error seeding database: {e}")
+            # Create tables if they don't exist
+            db.create_all()
+
+            # Import seed function inside the context/function to avoid circular imports 
+            try:
+                from app.server.seed import seed_database
+                seed_database()
+            except Exception as e:
+                print(f"Error seeding database: {e}")
+        except OperationalError as e:
+            raise RuntimeError(
+                "Database authentication failed. Check SUPABASE_DB_URL credentials. "
+                "If using Supabase pooler (:6543), use username format "
+                "'postgres.<project-ref>' with your database password."
+            ) from e

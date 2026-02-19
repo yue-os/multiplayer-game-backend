@@ -30,8 +30,12 @@ Create a `.env` file in the root directory.
 ```ini
 # Supabase Connection
 # Format: postgresql://[user]:[password]@[host]:[port]/[database]
-# Note: If using Supabase, use the "Transaction Pooler" port (usually 6543) or Session (5432).
-SUPABASE_DB_URL=postgresql://postgres:yourpassword@db.yourref.supabase.co:5432/postgres
+# Note:
+# - Direct connection (5432): user is usually `postgres`
+# - Transaction pooler (6543): user is `postgres.<project-ref>`
+# - Password must be your DATABASE password (not anon/service_role key)
+# Example (direct 5432):
+SUPABASE_DB_URL=postgresql://postgres:your_database_password@db.yourref.supabase.co:5432/postgres
 
 # Security
 SECRET_KEY=dev_secret_key_change_in_prod
