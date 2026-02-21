@@ -17,12 +17,16 @@ def register_server():
     """
     data = request.json
     client_ip = request.remote_addr
+    advertised_ip = str(data.get("ip", client_ip)).strip()
     port = data.get("port")
     name = data.get("name", "Unknown Server")
     count = data.get("count", 0)
 
+    if advertised_ip == "":
+        advertised_ip = client_ip
+
     # Check if server exists
-    server = GameServer.query.filter_by(ip=client_ip, port=port).first()
+    server = GameServer.query.filter_by(ip=advertised_ip, port=port).first()
     
     if server:
         server.last_heartbeat = time.time()
@@ -30,7 +34,7 @@ def register_server():
         server.name = name # Update name if changed
     else:
         server = GameServer(
-            ip=client_ip, 
+            ip=advertised_ip,
             port=port, 
             name=name, 
             player_count=count,

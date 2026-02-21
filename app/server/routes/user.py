@@ -62,6 +62,28 @@ def link_child():
     
     return jsonify({'message': f'Linked {child_username} to account'}), 200
 
+
+@user_bp.route('/parent/unlink_child', methods=['POST'])
+@token_required
+def unlink_child():
+    if request.current_user_role != 'Parent':
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    data = request.json or {}
+    child_username = (data.get('child_username') or '').strip()
+    if child_username == '':
+        return jsonify({'error': 'child_username is required'}), 400
+
+    parent_id = int(request.current_user_id)
+    child = User.query.filter_by(username=child_username, parent_id=parent_id, role='Student').first()
+    if not child:
+        return jsonify({'error': 'Linked child not found'}), 404
+
+    child.parent_id = None
+    db.session.commit()
+
+    return jsonify({'message': f'Unlinked {child_username} successfully'}), 200
+
 @user_bp.route('/parent/stats', methods=['GET'])
 @token_required
 def get_children_stats():
@@ -83,6 +105,7 @@ def get_children_stats():
         
         stats.append({
             "child": child.username,
+            "child_public_id": child.public_id,
             "playtime_logs": playtime,
             "scores": scores
         })

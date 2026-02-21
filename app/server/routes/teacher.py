@@ -1,4 +1,5 @@
 from datetime import datetime
+import time
 
 from flask import Blueprint, jsonify, request
 from sqlalchemy import case, func
@@ -396,6 +397,7 @@ def create_lobby():
     if existing:
         existing.name = server_name
         existing.player_count = player_count
+        existing.last_heartbeat = time.time()
         db.session.commit()
         return jsonify(
             {
@@ -416,7 +418,13 @@ def create_lobby():
             }
         ), 200
 
-    lobby = GameServer(name=server_name, ip=ip, port=port, player_count=player_count)
+    lobby = GameServer(
+        name=server_name,
+        ip=ip,
+        port=port,
+        player_count=player_count,
+        last_heartbeat=time.time()
+    )
     db.session.add(lobby)
     db.session.commit()
 

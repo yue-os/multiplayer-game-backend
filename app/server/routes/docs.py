@@ -114,6 +114,26 @@ def _openapi_spec(base_url: str):
                     'responses': {'200': {'description': 'Children stats'}, '403': {'description': 'Unauthorized'}},
                 }
             },
+            '/parent/unlink_child': {
+                'post': {
+                    'tags': ['Parent'],
+                    'summary': 'Unlink a child account from parent',
+                    'security': [{'BearerAuth': []}],
+                    'requestBody': {
+                        'required': True,
+                        'content': {
+                            'application/json': {
+                                'schema': {
+                                    'type': 'object',
+                                    'required': ['child_username'],
+                                    'properties': {'child_username': {'type': 'string'}},
+                                }
+                            }
+                        },
+                    },
+                    'responses': {'200': {'description': 'Unlinked'}, '403': {'description': 'Unauthorized'}},
+                }
+            },
             '/server/register': {
                 'post': {
                     'tags': ['Server Registry'],

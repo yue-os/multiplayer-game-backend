@@ -1,6 +1,7 @@
 from app.server.database import db
 from app.server.models.appModel import PublicIdMixin, TimestampMixin
 from datetime import datetime
+import time
 
 # --- User & Relationships ---
 
@@ -100,7 +101,7 @@ class GameServer(db.Model, PublicIdMixin):
     name = db.Column(db.String(100))
     ip = db.Column(db.String(50), nullable=False)
     port = db.Column(db.Integer, nullable=False)
-    last_heartbeat = db.Column(db.Float, default=datetime.utcnow().timestamp)
+    last_heartbeat = db.Column(db.Float, default=time.time)
     player_count = db.Column(db.Integer, default=0)
 
     # Composite unique constraint to identify servers by IP:Port
