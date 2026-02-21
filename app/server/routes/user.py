@@ -11,7 +11,7 @@ user_bp = Blueprint('user', __name__)
 def register():
     data = request.json
     username = data.get('username')
-    email = data.get('email')
+    email = data.get('email', 'test@gmail.com') # Default email for testing
     password = data.get('password')
     role = data.get('role', 'Student') # Default to Student
 
