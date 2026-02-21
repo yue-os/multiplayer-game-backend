@@ -70,13 +70,19 @@ def list_servers():
 def update_mission():
     user_id = request.current_user_id
     data = request.json
-    mission_id = data.get('mission_id')
+    mission_public_id = (data.get('mission_public_id') or '').strip()
     score = data.get('score')
     status = data.get('status', 'completed')
+
+    if not mission_public_id:
+        return jsonify({'error': 'mission_public_id is required'}), 400
+
+    mission = Mission.query.filter_by(public_id=mission_public_id).first()
+    if not mission:
+        return jsonify({'error': 'Invalid mission public ID'}), 400
     
     # Check if mission exists (optional validation)
-    if not Mission.query.get(mission_id):
-        return jsonify({'error': 'Invalid mission ID'}), 400
+    mission_id = mission.id
 
     progress = MissionProgress.query.filter_by(user_id=user_id, mission_id=mission_id).first()
     

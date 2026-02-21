@@ -47,7 +47,10 @@ def class_overview():
     )
 
     if not students:
-        class_payload = [{'id': classroom.id, 'name': classroom.name} for classroom in classes]
+        class_payload = [
+            {'id': classroom.id, 'public_id': classroom.public_id, 'name': classroom.name}
+            for classroom in classes
+        ]
         return jsonify({'classes': class_payload, 'students': []}), 200
 
     student_ids = [student.id for student in students]
@@ -97,7 +100,10 @@ def class_overview():
     }
 
     class_name_by_id = {classroom.id: classroom.name for classroom in classes}
-    class_payload = [{'id': classroom.id, 'name': classroom.name} for classroom in classes]
+    class_payload = [
+        {'id': classroom.id, 'public_id': classroom.public_id, 'name': classroom.name}
+        for classroom in classes
+    ]
 
     student_payload = []
     for student in students:
@@ -122,6 +128,7 @@ def class_overview():
         student_payload.append(
             {
                 'student_id': student.id,
+                'student_public_id': student.public_id,
                 'username': student.username,
                 'class_id': student.class_id,
                 'class_name': class_name_by_id.get(student.class_id),
@@ -133,16 +140,16 @@ def class_overview():
     return jsonify({'classes': class_payload, 'students': student_payload}), 200
 
 
-@teacher_bp.route('/teacher/student/<int:student_id>', methods=['GET'])
+@teacher_bp.route('/teacher/student/<string:student_public_id>', methods=['GET'])
 @token_required
-def student_summary(student_id: int):
+def student_summary(student_public_id: str):
     guard = _teacher_guard()
     if guard:
         return guard
 
     teacher_id = int(request.current_user_id)
 
-    student = User.query.filter_by(id=student_id, role='Student').first()
+    student = User.query.filter_by(public_id=student_public_id, role='Student').first()
     if not student:
         return jsonify({'error': 'Student not found'}), 404
 
@@ -151,14 +158,14 @@ def student_summary(student_id: int):
         return jsonify({'error': 'Student is not in your class'}), 403
 
     progress_rows = (
-        MissionProgress.query.filter_by(user_id=student_id)
+        MissionProgress.query.filter_by(user_id=student.id)
         .order_by(MissionProgress.updated_at.desc())
         .all()
     )
 
-    quiz_rows = QuizResult.query.filter_by(student_id=student_id).all()
+    quiz_rows = QuizResult.query.filter_by(student_id=student.id).all()
     playtime_rows = (
-        PlaytimeLog.query.filter_by(user_id=student_id)
+        PlaytimeLog.query.filter_by(user_id=student.id)
         .order_by(PlaytimeLog.date.desc())
         .all()
     )
@@ -185,8 +192,10 @@ def student_summary(student_id: int):
         {
             'student': {
                 'id': student.id,
+                'public_id': student.public_id,
                 'username': student.username,
                 'class_id': student.class_id,
+                'class_public_id': classroom.public_id,
                 'class_name': classroom.name,
             },
             'summary': {
@@ -256,6 +265,7 @@ def create_quiz():
             'message': 'Quiz created successfully',
             'quiz': {
                 'id': quiz.id,
+                'public_id': quiz.public_id,
                 'teacher_id': quiz.teacher_id,
                 'title': quiz.title,
                 'timer_seconds': quiz.timer_seconds,
@@ -273,23 +283,18 @@ def send_message():
         return guard
 
     data = request.get_json(silent=True) or {}
-    receiver_id = data.get('receiver_id')
+    receiver_public_id = (data.get('receiver_public_id') or '').strip()
     content = (data.get('content') or '').strip()
 
-    if receiver_id is None:
-        return jsonify({'error': 'receiver_id is required'}), 400
+    if not receiver_public_id:
+        return jsonify({'error': 'receiver_public_id is required'}), 400
 
     if not content:
         return jsonify({'error': 'content is required'}), 400
 
-    try:
-        receiver_id = int(receiver_id)
-    except (TypeError, ValueError):
-        return jsonify({'error': 'receiver_id must be an integer'}), 400
-
     teacher_id = int(request.current_user_id)
 
-    receiver = User.query.filter_by(id=receiver_id).first()
+    receiver = User.query.filter_by(public_id=receiver_public_id).first()
     if not receiver:
         return jsonify({'error': 'Receiver not found'}), 404
 
@@ -300,7 +305,7 @@ def send_message():
         valid_student = (
             db.session.query(User.id)
             .join(Class, Class.id == User.class_id)
-            .filter(User.id == receiver_id, User.role == 'Student', Class.teacher_id == teacher_id)
+            .filter(User.id == receiver.id, User.role == 'Student', Class.teacher_id == teacher_id)
             .first()
         )
         if not valid_student:
@@ -312,7 +317,7 @@ def send_message():
 
         student_exists = (
             User.query.filter(
-                User.parent_id == receiver_id,
+                User.parent_id == receiver.id,
                 User.role == 'Student',
                 User.class_id.in_(teacher_class_ids),
             ).first()
@@ -320,7 +325,7 @@ def send_message():
         if not student_exists:
             return jsonify({'error': 'Parent is not linked to your students'}), 403
 
-    message = Message(sender_id=teacher_id, receiver_id=receiver_id, content=content)
+    message = Message(sender_id=teacher_id, receiver_id=receiver.id, content=content)
     db.session.add(message)
     db.session.commit()
 
@@ -329,8 +334,10 @@ def send_message():
             'message': 'Message sent successfully',
             'data': {
                 'id': message.id,
+                'public_id': message.public_id,
                 'sender_id': message.sender_id,
                 'receiver_id': message.receiver_id,
+                'receiver_public_id': receiver.public_id,
                 'content': message.content,
                 'created_at': message.created_at.isoformat() if message.created_at else None,
             },
@@ -348,21 +355,16 @@ def create_lobby():
     teacher_id = int(request.current_user_id)
     data = request.get_json(silent=True) or {}
 
-    class_id = data.get('class_id')
+    class_public_id = (data.get('class_public_id') or '').strip()
     name = (data.get('name') or '').strip()
     ip = (data.get('ip') or '').strip()
     port = data.get('port')
     player_count = data.get('player_count', 0)
 
-    if class_id is None:
-        return jsonify({'error': 'class_id is required'}), 400
+    if not class_public_id:
+        return jsonify({'error': 'class_public_id is required'}), 400
 
-    try:
-        class_id = int(class_id)
-    except (TypeError, ValueError):
-        return jsonify({'error': 'class_id must be an integer'}), 400
-
-    classroom = Class.query.filter_by(id=class_id, teacher_id=teacher_id).first()
+    classroom = Class.query.filter_by(public_id=class_public_id, teacher_id=teacher_id).first()
     if not classroom:
         return jsonify({'error': 'Class not found or not owned by teacher'}), 403
 
@@ -400,11 +402,13 @@ def create_lobby():
                 'message': 'Lobby updated successfully',
                 'lobby': {
                     'id': existing.id,
+                    'public_id': existing.public_id,
                     'name': existing.name,
                     'ip': existing.ip,
                     'port': existing.port,
                     'player_count': existing.player_count,
-                    'class_id': class_id,
+                    'class_id': classroom.id,
+                    'class_public_id': classroom.public_id,
                     'class_name': classroom.name,
                     'teacher_id': teacher_id,
                 },
@@ -421,11 +425,13 @@ def create_lobby():
             'message': 'Lobby created successfully',
             'lobby': {
                 'id': lobby.id,
+                'public_id': lobby.public_id,
                 'name': lobby.name,
                 'ip': lobby.ip,
                 'port': lobby.port,
                 'player_count': lobby.player_count,
-                'class_id': class_id,
+                'class_id': classroom.id,
+                'class_public_id': classroom.public_id,
                 'class_name': classroom.name,
                 'teacher_id': teacher_id,
             },

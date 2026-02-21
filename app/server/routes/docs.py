@@ -155,9 +155,9 @@ def _openapi_spec(base_url: str):
                             'application/json': {
                                 'schema': {
                                     'type': 'object',
-                                    'required': ['mission_id', 'score'],
+                                    'required': ['mission_public_id', 'score'],
                                     'properties': {
-                                        'mission_id': {'type': 'integer'},
+                                        'mission_public_id': {'type': 'string', 'format': 'uuid'},
                                         'score': {'type': 'integer'},
                                         'status': {'type': 'string', 'example': 'completed'},
                                     },
@@ -167,7 +167,7 @@ def _openapi_spec(base_url: str):
                     },
                     'responses': {
                         '200': {'description': 'Progress saved'},
-                        '400': {'description': 'Invalid mission ID or payload'},
+                        '400': {'description': 'Invalid mission public ID or payload'},
                         '401': {'description': 'Missing or invalid token'},
                     },
                 }
@@ -180,17 +180,17 @@ def _openapi_spec(base_url: str):
                     'responses': {'200': {'description': 'Class overview'}, '403': {'description': 'Unauthorized'}},
                 }
             },
-            '/teacher/student/{student_id}': {
+            '/teacher/student/{student_public_id}': {
                 'get': {
                     'tags': ['Teacher'],
                     'summary': 'Get detailed student performance summary',
                     'security': [{'BearerAuth': []}],
                     'parameters': [
                         {
-                            'name': 'student_id',
+                            'name': 'student_public_id',
                             'in': 'path',
                             'required': True,
-                            'schema': {'type': 'integer'},
+                            'schema': {'type': 'string', 'format': 'uuid'},
                         }
                     ],
                     'responses': {
@@ -235,9 +235,9 @@ def _openapi_spec(base_url: str):
                             'application/json': {
                                 'schema': {
                                     'type': 'object',
-                                    'required': ['receiver_id', 'content'],
+                                    'required': ['receiver_public_id', 'content'],
                                     'properties': {
-                                        'receiver_id': {'type': 'integer'},
+                                        'receiver_public_id': {'type': 'string', 'format': 'uuid'},
                                         'content': {'type': 'string'},
                                     },
                                 }
@@ -258,9 +258,9 @@ def _openapi_spec(base_url: str):
                             'application/json': {
                                 'schema': {
                                     'type': 'object',
-                                    'required': ['class_id'],
+                                    'required': ['class_public_id'],
                                     'properties': {
-                                        'class_id': {'type': 'integer'},
+                                        'class_public_id': {'type': 'string', 'format': 'uuid'},
                                         'name': {'type': 'string'},
                                         'ip': {'type': 'string'},
                                         'port': {'type': 'integer'},

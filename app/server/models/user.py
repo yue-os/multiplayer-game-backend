@@ -1,10 +1,10 @@
 from app.server.database import db
-from app.server.models.appModel import TimestampMixin
+from app.server.models.appModel import PublicIdMixin, TimestampMixin
 from datetime import datetime
 
 # --- User & Relationships ---
 
-class User(db.Model, TimestampMixin):
+class User(db.Model, TimestampMixin, PublicIdMixin):
     __tablename__ = 'users'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -23,6 +23,7 @@ class User(db.Model, TimestampMixin):
     def to_dict(self):
         return {
             "id": self.id,
+            "public_id": self.public_id,
             "username": self.username,
             "email": self.email,
             "role": self.role,
@@ -30,7 +31,7 @@ class User(db.Model, TimestampMixin):
             "class_id": self.class_id
         }
 
-class Class(db.Model, TimestampMixin):
+class Class(db.Model, TimestampMixin, PublicIdMixin):
     __tablename__ = 'classes'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -44,7 +45,7 @@ class Class(db.Model, TimestampMixin):
 
 # --- Game Data ---
 
-class Mission(db.Model):
+class Mission(db.Model, PublicIdMixin):
     __tablename__ = 'missions'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -54,7 +55,7 @@ class Mission(db.Model):
     # Static data, usually no direct user relationship needed unless for tracking creation
     # But Progress links User + Mission
 
-class MissionProgress(db.Model, TimestampMixin):
+class MissionProgress(db.Model, TimestampMixin, PublicIdMixin):
     __tablename__ = 'mission_progress'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -64,7 +65,7 @@ class MissionProgress(db.Model, TimestampMixin):
     status = db.Column(db.String(20), default="started") # started, completed, failed
     score = db.Column(db.Integer, default=0)
 
-class Quiz(db.Model, TimestampMixin):
+class Quiz(db.Model, TimestampMixin, PublicIdMixin):
     __tablename__ = 'quizzes'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -73,7 +74,7 @@ class Quiz(db.Model, TimestampMixin):
     timer_seconds = db.Column(db.Integer, default=300)
     start_date = db.Column(db.DateTime, default=datetime.utcnow)
 
-class QuizResult(db.Model, TimestampMixin):
+class QuizResult(db.Model, TimestampMixin, PublicIdMixin):
     __tablename__ = 'quiz_results'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -81,7 +82,7 @@ class QuizResult(db.Model, TimestampMixin):
     student_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     score = db.Column(db.Integer, nullable=False)
 
-class Message(db.Model, TimestampMixin):
+class Message(db.Model, TimestampMixin, PublicIdMixin):
     __tablename__ = 'messages'
 
     id = db.Column(db.Integer, primary_key=True)
@@ -92,7 +93,7 @@ class Message(db.Model, TimestampMixin):
     sender = db.relationship('User', foreign_keys=[sender_id], backref='sent_messages')
     receiver = db.relationship('User', foreign_keys=[receiver_id], backref='received_messages')
 
-class GameServer(db.Model):
+class GameServer(db.Model, PublicIdMixin):
     __tablename__ = 'game_servers'
     
     id = db.Column(db.Integer, primary_key=True)
@@ -107,7 +108,7 @@ class GameServer(db.Model):
 
 # --- Logs ---
 
-class PlaytimeLog(db.Model):
+class PlaytimeLog(db.Model, PublicIdMixin):
     __tablename__ = 'playtime_logs'
     
     id = db.Column(db.Integer, primary_key=True)

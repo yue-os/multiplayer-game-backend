@@ -1,12 +1,53 @@
 import os
+import uuid
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.exc import OperationalError
+from sqlalchemy import inspect, text
 
 class Base(DeclarativeBase):
     pass
 
 db = SQLAlchemy(model_class=Base)
+
+
+def _ensure_public_ids(app):
+    from app.server.models import user
+
+    model_table_pairs = [
+        (user.User, 'users'),
+        (user.Class, 'classes'),
+        (user.Mission, 'missions'),
+        (user.MissionProgress, 'mission_progress'),
+        (user.Quiz, 'quizzes'),
+        (user.QuizResult, 'quiz_results'),
+        (user.Message, 'messages'),
+        (user.GameServer, 'game_servers'),
+        (user.PlaytimeLog, 'playtime_logs'),
+    ]
+
+    inspector = inspect(db.engine)
+
+    for model, table_name in model_table_pairs:
+        if not inspector.has_table(table_name):
+            continue
+
+        columns = {col['name'] for col in inspector.get_columns(table_name)}
+        if 'public_id' not in columns:
+            db.session.execute(text(f"ALTER TABLE {table_name} ADD COLUMN public_id VARCHAR(36)"))
+            db.session.commit()
+
+        rows = model.query.filter(model.public_id.is_(None)).all()
+        if rows:
+            for row in rows:
+                row.public_id = str(uuid.uuid4())
+            db.session.commit()
+
+        db.session.execute(text(f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{table_name}_public_id ON {table_name}(public_id)"))
+        db.session.commit()
+
+        db.session.execute(text(f"ALTER TABLE {table_name} ALTER COLUMN public_id SET NOT NULL"))
+        db.session.commit()
 
 def init_db(app):
     database_url = os.getenv('SUPABASE_DB_URL')
@@ -30,6 +71,7 @@ def init_db(app):
         try:
             # Create tables if they don't exist
             db.create_all()
+            _ensure_public_ids(app)
 
             # Import seed function inside the context/function to avoid circular imports 
             try:
