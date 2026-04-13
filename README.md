@@ -1,6 +1,6 @@
-# Flask Supabase Game Backend
+# Flask PostgreSQL Game Backend
 
-This is a production-ready, modular Flask backend designed for a multiplayer game. It integrates with **Supabase (PostgreSQL)** for persistence, uses **JWT** for secure authentication, and manages a **Game Server Registry** for Godot instances.
+This is a production-ready, modular Flask backend designed for a multiplayer game. It integrates with **PostgreSQL** for persistence, uses **JWT** for secure authentication, and manages a **Game Server Registry** for Godot instances.
 
 ## 📂 Project Structure
 
@@ -22,20 +22,16 @@ app/
 
 ### 1. Prerequisites
 *   Python 3.8+
-*   A Supabase Project (or any PostgreSQL database).
+*   A local PostgreSQL database (or any PostgreSQL database).
 
 ### 2. Environment Variables
 Create a `.env` file in the root directory.
 
 ```ini
-# Supabase Connection
+# Local PostgreSQL Connection
 # Format: postgresql://[user]:[password]@[host]:[port]/[database]
-# Note:
-# - Direct connection (5432): user is usually `postgres`
-# - Transaction pooler (6543): user is `postgres.<project-ref>`
-# - Password must be your DATABASE password (not anon/service_role key)
-# Example (direct 5432):
-SUPABASE_DB_URL=postgresql://postgres:your_database_password@db.yourref.supabase.co:5432/postgres
+# Example (local default):
+DATABASE_URL=postgresql://postgres:your_database_password@localhost:5432/postgres
 
 # Security
 SECRET_KEY=dev_secret_key_change_in_prod
@@ -114,7 +110,7 @@ gunicorn -w 4 -b 0.0.0.0:5000 main:app
 
 ---
 
-## 🗄️ Database Schema (Supabase)
+## 🗄️ Database Schema (PostgreSQL)
 
 The application uses SQLAlchemy. Tables are automatically created (`db.create_all()`) when the app starts if they do not exist.
 
@@ -126,6 +122,33 @@ The application uses SQLAlchemy. Tables are automatically created (`db.create_al
 
 ## 🤝 Team Notes
 
-1.  **Supabase Connection**: The `database.py` script automatically fixes Supabase connection strings starting with `postgres://` to `postgresql://` for compatibility.
+1.  **PostgreSQL Connection**: The `database.py` script automatically fixes connection strings starting with `postgres://` to `postgresql://` for compatibility.
 2.  **Timezones**: All timestamps (`created_at`, `updated_at`, `last_heartbeat`) are stored in UTC.
-3.  **Deployment**: When deploying to a cloud provider (e.g., Render, Railway, AWS), ensure the `SUPABASE_DB_URL` environment variable is set.
+3.  **Deployment**: When deploying to a cloud provider (e.g., Render, Railway, AWS), ensure the `DATABASE_URL` environment variable is set.
+
+---
+
+## 🔌 Realtime WebSocket (FastAPI) Local Test
+
+The project currently keeps Flask routes and also includes a FastAPI realtime socket entrypoint for BatangAware gameplay loops.
+
+### 1. Install dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Run FastAPI websocket service
+```bash
+uvicorn fastapi_main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### 3. Run websocket smoke test client
+In another terminal:
+```bash
+python scripts/ws_test_client.py --base-ws-url ws://127.0.0.1:8000 --lobby-id lobby-1
+```
+
+Expected behavior:
+- Two clients connect to the same lobby.
+- `buy_item` and `request_trade` events are sent.
+- Console prints include `item_purchased`, `trade_processed`, and `game_state` updates.

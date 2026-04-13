@@ -50,11 +50,11 @@ def _ensure_public_ids(app):
         db.session.commit()
 
 def init_db(app):
-    database_url = os.getenv('SUPABASE_DB_URL')
+    database_url = os.getenv('DATABASE_URL')
     if not database_url:
-        raise ValueError("SUPABASE_DB_URL is not set in environment variables")
+        raise ValueError("DATABASE_URL is not set in environment variables")
     
-    # SQLAlchemy requires 'postgresql://', Supabase might provide 'postgres://'
+    # SQLAlchemy requires 'postgresql://'
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql://", 1)
 
@@ -81,7 +81,5 @@ def init_db(app):
                 print(f"Error seeding database: {e}")
         except OperationalError as e:
             raise RuntimeError(
-                "Database authentication failed. Check SUPABASE_DB_URL credentials. "
-                "If using Supabase pooler (:6543), use username format "
-                "'postgres.<project-ref>' with your database password."
+                "Database authentication failed. Check DATABASE_URL credentials."
             ) from e
