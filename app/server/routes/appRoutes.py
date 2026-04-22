@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from app.server.database import db
 from app.server.models.user import GameServer, MissionProgress, Mission
 from app.auth.auth_bearer import token_required
+from sqlalchemy import or_
 import time
 from datetime import datetime
 
@@ -48,13 +49,16 @@ def register_server():
 @app_bp.route('/server/list', methods=['GET'])
 def list_servers():
     """
-    Returns list of active game servers (heartbeat within last 15s).
+    Returns list of active game servers (heartbeat within last 15s)
+    plus persistent teacher-created lobbies.
     """
     now = time.time()
     cutoff = now - 15 # 15 seconds timeout
     
-    # Query DB for active servers
-    active_servers = GameServer.query.filter(GameServer.last_heartbeat > cutoff).all()
+    # Query DB for active heartbeat servers OR persistent lobbies.
+    active_servers = GameServer.query.filter(
+        or_(GameServer.last_heartbeat > cutoff, GameServer.persistent.is_(True))
+    ).all()
     
     server_list = []
     for s in active_servers:
@@ -62,7 +66,8 @@ def list_servers():
             "ip": s.ip,
             "port": s.port,
             "name": s.name,
-            "count": s.player_count
+            "count": s.player_count,
+            "persistent": bool(s.persistent)
         })
         
     return jsonify(server_list), 200

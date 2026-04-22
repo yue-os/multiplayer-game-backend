@@ -10,19 +10,28 @@ user_bp = Blueprint('user', __name__)
 @user_bp.route('/auth/register', methods=['POST'])
 def register():
     data = request.json
+    first_name = (data.get('first_name') or '').strip()
+    last_name = (data.get('last_name') or '').strip()
     username = data.get('username')
     email = data.get('email', 'test@gmail.com') # Default email for testing
     password = data.get('password')
     role = data.get('role', 'Student') # Default to Student
 
-    if not username or not email or not password:
+    if not first_name or not last_name or not username or not email or not password:
         return jsonify({'error': 'Missing required fields'}), 400
 
     if User.query.filter((User.username == username) | (User.email == email)).first():
         return jsonify({'error': 'User already exists'}), 400
 
     hashed_pw = generate_password_hash(password)
-    new_user = User(username=username, email=email, password_hash=hashed_pw, role=role)
+    new_user = User(
+        first_name=first_name,
+        last_name=last_name,
+        username=username,
+        email=email,
+        password_hash=hashed_pw,
+        role=role,
+    )
     
     db.session.add(new_user)
     db.session.commit()

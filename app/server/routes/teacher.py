@@ -37,7 +37,7 @@ def class_overview():
     classes = Class.query.filter_by(teacher_id=teacher_id).all()
 
     if not classes:
-        return jsonify({'classes': [], 'students': []}), 200
+        return jsonify({'classes': [], 'students': [], 'parents': []}), 200
 
     class_ids = [classroom.id for classroom in classes]
 
@@ -52,7 +52,7 @@ def class_overview():
             {'id': classroom.id, 'public_id': classroom.public_id, 'name': classroom.name}
             for classroom in classes
         ]
-        return jsonify({'classes': class_payload, 'students': []}), 200
+        return jsonify({'classes': class_payload, 'students': [], 'parents': []}), 200
 
     student_ids = [student.id for student in students]
 
@@ -100,6 +100,36 @@ def class_overview():
         for row in quiz_rows
     }
 
+    parent_ids = sorted({student.parent_id for student in students if student.parent_id is not None})
+    parent_rows = []
+    if parent_ids:
+        parent_rows = (
+            User.query.filter(User.id.in_(parent_ids), User.role == 'Parent')
+            .order_by(User.first_name.asc(), User.last_name.asc(), User.username.asc())
+            .all()
+        )
+    parent_map = {parent.id: parent for parent in parent_rows}
+
+    parent_child_counts = {parent_id: 0 for parent_id in parent_ids}
+    for student in students:
+        if student.parent_id in parent_child_counts:
+            parent_child_counts[student.parent_id] += 1
+
+    parent_payload = []
+    for parent in parent_rows:
+        full_name = f"{(parent.first_name or '').strip()} {(parent.last_name or '').strip()}".strip()
+        if not full_name:
+            full_name = parent.username
+        parent_payload.append(
+            {
+                'parent_id': parent.id,
+                'parent_public_id': parent.public_id,
+                'parent_name': full_name,
+                'username': parent.username,
+                'children_count': int(parent_child_counts.get(parent.id, 0)),
+            }
+        )
+
     class_name_by_id = {classroom.id: classroom.name for classroom in classes}
     class_payload = [
         {'id': classroom.id, 'public_id': classroom.public_id, 'name': classroom.name}
@@ -133,12 +163,22 @@ def class_overview():
                 'username': student.username,
                 'class_id': student.class_id,
                 'class_name': class_name_by_id.get(student.class_id),
+                'parent_id': student.parent_id,
+                'parent_public_id': parent_map.get(student.parent_id).public_id if parent_map.get(student.parent_id) else None,
+                'parent_name': (
+                    (
+                        f"{(parent_map.get(student.parent_id).first_name or '').strip()} {(parent_map.get(student.parent_id).last_name or '').strip()}"
+                    ).strip()
+                    if parent_map.get(student.parent_id)
+                    else None
+                )
+                or (parent_map.get(student.parent_id).username if parent_map.get(student.parent_id) else None),
                 'missions': mission_summary,
                 'quizzes': quiz_summary,
             }
         )
 
-    return jsonify({'classes': class_payload, 'students': student_payload}), 200
+    return jsonify({'classes': class_payload, 'students': student_payload, 'parents': parent_payload}), 200
 
 
 @teacher_bp.route('/teacher/student/<string:student_public_id>', methods=['GET'])
@@ -395,9 +435,15 @@ def create_lobby():
 
     existing = GameServer.query.filter_by(ip=ip, port=port).first()
     if existing:
+        if existing.owner_teacher_id is not None and existing.owner_teacher_id != teacher_id:
+            return jsonify({'error': 'This lobby endpoint is owned by another teacher'}), 403
+
         existing.name = server_name
         existing.player_count = player_count
         existing.last_heartbeat = time.time()
+        existing.persistent = True
+        existing.owner_teacher_id = teacher_id
+        existing.class_id = classroom.id
         db.session.commit()
         return jsonify(
             {
@@ -409,12 +455,13 @@ def create_lobby():
                     'ip': existing.ip,
                     'port': existing.port,
                     'player_count': existing.player_count,
+                    'persistent': existing.persistent,
+                    'owner_teacher_id': existing.owner_teacher_id,
                     'class_id': classroom.id,
                     'class_public_id': classroom.public_id,
                     'class_name': classroom.name,
                     'teacher_id': teacher_id,
                 },
-                'note': 'GameServer has no class_id column; class linkage is enforced at creation time and returned in response.',
             }
         ), 200
 
@@ -423,7 +470,10 @@ def create_lobby():
         ip=ip,
         port=port,
         player_count=player_count,
-        last_heartbeat=time.time()
+        last_heartbeat=time.time(),
+        persistent=True,
+        owner_teacher_id=teacher_id,
+        class_id=classroom.id,
     )
     db.session.add(lobby)
     db.session.commit()
@@ -438,11 +488,62 @@ def create_lobby():
                 'ip': lobby.ip,
                 'port': lobby.port,
                 'player_count': lobby.player_count,
+                'persistent': lobby.persistent,
+                'owner_teacher_id': lobby.owner_teacher_id,
                 'class_id': classroom.id,
                 'class_public_id': classroom.public_id,
                 'class_name': classroom.name,
                 'teacher_id': teacher_id,
             },
-            'note': 'GameServer has no class_id column; class linkage is enforced at creation time and returned in response.',
         }
     ), 201
+
+
+@teacher_bp.route('/teacher/lobby/list', methods=['GET'])
+@token_required
+def list_teacher_lobbies():
+    guard = _teacher_guard()
+    if guard:
+        return guard
+
+    teacher_id = int(request.current_user_id)
+    lobbies = GameServer.query.filter_by(owner_teacher_id=teacher_id).order_by(GameServer.id.desc()).all()
+
+    class_map = {c.id: c for c in Class.query.filter_by(teacher_id=teacher_id).all()}
+    payload = []
+    for lobby in lobbies:
+        classroom = class_map.get(lobby.class_id)
+        payload.append(
+            {
+                'id': lobby.id,
+                'public_id': lobby.public_id,
+                'name': lobby.name,
+                'ip': lobby.ip,
+                'port': lobby.port,
+                'player_count': lobby.player_count,
+                'persistent': lobby.persistent,
+                'class_id': lobby.class_id,
+                'class_public_id': classroom.public_id if classroom else None,
+                'class_name': classroom.name if classroom else None,
+                'teacher_id': teacher_id,
+            }
+        )
+
+    return jsonify({'lobbies': payload}), 200
+
+
+@teacher_bp.route('/teacher/lobby/<string:lobby_public_id>', methods=['DELETE'])
+@token_required
+def delete_teacher_lobby(lobby_public_id: str):
+    guard = _teacher_guard()
+    if guard:
+        return guard
+
+    teacher_id = int(request.current_user_id)
+    lobby = GameServer.query.filter_by(public_id=lobby_public_id, owner_teacher_id=teacher_id).first()
+    if not lobby:
+        return jsonify({'error': 'Lobby not found or not owned by teacher'}), 404
+
+    db.session.delete(lobby)
+    db.session.commit()
+    return jsonify({'message': 'Lobby removed successfully', 'public_id': lobby_public_id}), 200

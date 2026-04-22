@@ -1,25 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import asdict
-from enum import Enum
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field, ValidationError
 
 from app.auth.auth_handler import decodeJWT
-from app.server.services.game_logic_service import GameManager
-
-
-class InitLobbyRequest(BaseModel):
-    lobby_id: str
-
-
-class GamePhase(str, Enum):
-    ERRAND = "Errand Phase"
-    INTERACTION = "Interaction Phase"
-    ACTIVITY_LOG = "Activity Log Phase"
-    CLINIC_VOTING = "Clinic Voting Phase"
+from app.server.models.game_models import (
+    GameState,
+    HealthStatus,
+    ItemType,
+    LocationEvent,
+    PlayerState,
+    VisibleRole,
+)
+from app.server.services.game_logic import GameEngine
 
 
 class SocketEnvelope(BaseModel):
@@ -28,34 +24,55 @@ class SocketEnvelope(BaseModel):
 
 
 class TradeRequest(BaseModel):
-    with_player_id: str
-    item_id: str
+    with_player_id: str = Field(min_length=1)
+    items_offered_a: dict[str, int] = Field(default_factory=dict)
+    items_offered_b: dict[str, int] = Field(default_factory=dict)
 
 
-class BuyItemRequest(BaseModel):
-    item_id: str
-    cost: int = Field(gt=0)
+class LobbyRuntime(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+
+    game_state: GameState
+    engine: GameEngine
+    timer_task: asyncio.Task[None] | None = None
 
 
 class LobbySocketHub:
     def __init__(self) -> None:
         self._connections: dict[str, dict[str, WebSocket]] = {}
-        self._games: dict[str, GameManager] = {}
-        self._phases: dict[str, GamePhase] = {}
+        self._lobbies: dict[str, LobbyRuntime] = {}
 
     async def connect_to_lobby(self, lobby_id: str, player_token: str, websocket: WebSocket) -> str:
-        player_id = self._parse_player_token(player_token)
+        auth_payload = self._parse_player_token(player_token)
+        player_id = auth_payload["player_id"]
+        visible_role = self._map_claim_role(auth_payload["role"])
+
         await websocket.accept()
 
         lobby_connections = self._connections.setdefault(lobby_id, {})
         lobby_connections[player_id] = websocket
 
-        game_manager = self._games.setdefault(lobby_id, GameManager(lobby_id=lobby_id))
-        self._phases.setdefault(lobby_id, GamePhase.ERRAND)
+        lobby_runtime = self._lobbies.get(lobby_id)
+        if lobby_runtime is None:
+            game_state = GameState(lobby_id=lobby_id, current_event=LocationEvent.SCHOOL, lockdown_meter=0)
+            lobby_runtime = LobbyRuntime(game_state=game_state, engine=GameEngine(game_state))
+            self._lobbies[lobby_id] = lobby_runtime
 
-        # Auto-initialize when exactly 10 players are connected.
-        if len(lobby_connections) == GameManager.REQUIRED_PLAYERS and not game_manager.players:
-            game_manager.initialize_game(list(lobby_connections.keys()))
+        player_state = self._find_player(lobby_runtime.game_state, player_id)
+        if player_state is None:
+            player_state = PlayerState(
+                player_id=player_id,
+                visible_role=visible_role,
+                inventory={
+                    ItemType.SNACKS: 1,
+                    ItemType.MASKS: 1,
+                },
+                health_status=HealthStatus.HEALTHY,
+            )
+            lobby_runtime.game_state.players.append(player_state)
+
+        if lobby_runtime.timer_task is None or lobby_runtime.timer_task.done():
+            lobby_runtime.timer_task = asyncio.create_task(self.start_event_timer(lobby_id))
 
         return player_id
 
@@ -67,11 +84,12 @@ class LobbySocketHub:
         lobby_connections.pop(player_id, None)
         if not lobby_connections:
             self._connections.pop(lobby_id, None)
-            self._games.pop(lobby_id, None)
-            self._phases.pop(lobby_id, None)
+            runtime = self._lobbies.pop(lobby_id, None)
+            if runtime is not None and runtime.timer_task is not None:
+                runtime.timer_task.cancel()
 
     async def handle_trade(self, lobby_id: str, player_id: str, payload: dict[str, Any]) -> None:
-        game_manager = self._get_lobby_game_or_raise(lobby_id)
+        runtime = self._get_lobby_runtime_or_raise(lobby_id)
 
         try:
             trade = TradeRequest.model_validate(payload)
@@ -81,153 +99,107 @@ class LobbySocketHub:
                 detail=f"Invalid trade payload: {exc.errors()}",
             ) from exc
 
-        result = game_manager.process_trade(
-            player_a_id=player_id,
-            player_b_id=trade.with_player_id,
-            item_id=trade.item_id,
+        player_a = self._find_player(runtime.game_state, player_id)
+        if player_a is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Player '{player_id}' not found in lobby '{lobby_id}'.",
+            )
+
+        player_b = self._find_player(runtime.game_state, trade.with_player_id)
+        if player_b is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Player '{trade.with_player_id}' not found in lobby '{lobby_id}'.",
+            )
+
+        items_offered_a = self._parse_trade_items(trade.items_offered_a)
+        items_offered_b = self._parse_trade_items(trade.items_offered_b)
+
+        runtime.engine.process_trade(
+            player_a=player_a,
+            player_b=player_b,
+            items_offered_a=items_offered_a,
+            items_offered_b=items_offered_b,
         )
 
         await self._send_to_player(
             lobby_id=lobby_id,
             player_id=player_id,
             message={
-                "event": "trade_processed",
-                "data": asdict(result),
-            },
-        )
-
-        await self.broadcast_game_state(lobby_id)
-
-    async def handle_buy_item(self, lobby_id: str, player_id: str, payload: dict[str, Any]) -> None:
-        game_manager = self._get_lobby_game_or_raise(lobby_id)
-
-        try:
-            purchase = BuyItemRequest.model_validate(payload)
-        except ValidationError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid buy_item payload: {exc.errors()}",
-            ) from exc
-
-        if purchase.item_id not in GameManager.ITEM_POOL:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Unknown shop item '{purchase.item_id}'.",
-            )
-
-        player_state = game_manager.players.get(player_id)
-        if player_state is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Player '{player_id}' is not part of lobby '{lobby_id}'.",
-            )
-
-        if player_state.coins < purchase.cost:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Insufficient coins for this purchase.",
-            )
-
-        player_state.coins -= purchase.cost
-        player_state.inventory.append(purchase.item_id)
-
-        await self._send_to_player(
-            lobby_id=lobby_id,
-            player_id=player_id,
-            message={
-                "event": "item_purchased",
+                "event": "trade_result",
                 "data": {
-                    "player_id": player_id,
-                    "item_id": purchase.item_id,
-                    "cost": purchase.cost,
-                    "remaining_coins": player_state.coins,
+                    "you": self._private_player_payload(player_a),
+                    "other_player": self._public_player_payload(player_b),
                 },
             },
         )
 
-        await self.broadcast_game_state(lobby_id)
+        await self._send_to_player(
+            lobby_id=lobby_id,
+            player_id=player_b.player_id,
+            message={
+                "event": "trade_result",
+                "data": {
+                    "you": self._private_player_payload(player_b),
+                    "other_player": self._public_player_payload(player_a),
+                },
+            },
+        )
 
     async def broadcast_game_state(self, lobby_id: str) -> None:
-        game_manager = self._get_lobby_game_or_raise(lobby_id)
+        runtime = self._get_lobby_runtime_or_raise(lobby_id)
         lobby_connections = self._connections.get(lobby_id, {})
         if not lobby_connections:
             return
 
-        # If game is not initialized, send a waiting state instead.
-        if not game_manager.players:
-            for recipient_id, recipient_socket in list(lobby_connections.items()):
-                payload = {
-                    "event": "game_state",
-                    "data": {
-                        "lobby_id": lobby_id,
-                        "phase": "WAITING",
-                        "activity_log": [],
-                        "public": {
-                            "player_count": 0,
-                            "connected_count": len(lobby_connections),
-                            "players": [],
-                        },
-                        "private": {
-                            "player_id": recipient_id,
-                            "role": "Unknown",
-                            "coins": 0,
-                            "inventory": [],
-                            "checklist": [],
-                        },
-                    },
-                }
-                await recipient_socket.send_json(payload)
-            return
-
-        phase = self._phases.get(lobby_id, GamePhase.ERRAND).value
-        activity_log = game_manager.generate_activity_log()
-        players_public = [
-            {
-                "player_id": player.player_id,
-                "role": player.role,
-                "coins": player.coins,
-                "inventory_count": len(player.inventory),
-                "checklist_completed": sum(1 for item in player.checklist if item in player.inventory),
-                "checklist_total": len(player.checklist),
-            }
-            for player in game_manager.players.values()
-        ]
+        players_public = [self._public_player_payload(player) for player in runtime.game_state.players]
 
         for recipient_id, recipient_socket in list(lobby_connections.items()):
-            recipient = game_manager.players.get(recipient_id)
+            recipient = self._find_player(runtime.game_state, recipient_id)
             if recipient is None:
                 continue
-
-            private_view: dict[str, Any] = {
-                "player_id": recipient.player_id,
-                "role": recipient.role,
-                "coins": recipient.coins,
-                "inventory": list(recipient.inventory),
-                "checklist": list(recipient.checklist),
-            }
-
-            # Infection status is only visible to the infected player themselves.
-            if recipient.is_infected:
-                private_view["is_infected"] = True
 
             payload = {
                 "event": "game_state",
                 "data": {
                     "lobby_id": lobby_id,
-                    "phase": phase,
-                    "activity_log": activity_log,
-                    "public": {
-                        "player_count": len(game_manager.players),
-                        "connected_count": len(lobby_connections),
-                        "players": players_public,
-                    },
-                    "private": private_view,
+                    "current_event": runtime.game_state.current_event.value,
+                    "lockdown_meter": runtime.game_state.lockdown_meter,
+                    "public_players": players_public,
+                    "you": self._private_player_payload(recipient),
                 },
             }
 
             await recipient_socket.send_json(payload)
 
-    def _parse_player_token(self, player_token: str) -> str:
+    async def start_event_timer(self, lobby_id: str) -> None:
+        while True:
+            await asyncio.sleep(60)
+            if lobby_id not in self._lobbies:
+                return
+            if not self._connections.get(lobby_id):
+                return
+
+            runtime = self._lobbies[lobby_id]
+            announcement = runtime.engine.rotate_event()
+            hints = self._build_event_hints(runtime.game_state.current_event)
+
+            await self._broadcast_to_lobby(
+                lobby_id,
+                {
+                    "event": "location_event",
+                    "data": {
+                        "current_event": runtime.game_state.current_event.value,
+                        "announcement": announcement,
+                        "hints": hints,
+                    },
+                },
+            )
+
+            await self.broadcast_game_state(lobby_id)
+
+    def _parse_player_token(self, player_token: str) -> dict[str, str]:
         if player_token.strip() == "":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -243,21 +215,22 @@ class LobbySocketHub:
             )
 
         player_id = str(decoded["user_id"]).strip()
+        role = str(decoded.get("role", "Student")).strip()
         if player_id == "":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Token is missing a valid user_id.",
             )
-        return player_id
+        return {"player_id": player_id, "role": role}
 
-    def _get_lobby_game_or_raise(self, lobby_id: str) -> GameManager:
-        game_manager = self._games.get(lobby_id)
-        if game_manager is None:
+    def _get_lobby_runtime_or_raise(self, lobby_id: str) -> LobbyRuntime:
+        runtime = self._lobbies.get(lobby_id)
+        if runtime is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Lobby '{lobby_id}' does not exist.",
             )
-        return game_manager
+        return runtime
 
     async def _send_to_player(self, lobby_id: str, player_id: str, message: dict[str, Any]) -> None:
         lobby_connections = self._connections.get(lobby_id, {})
@@ -269,52 +242,101 @@ class LobbySocketHub:
             )
         await websocket.send_json(message)
 
+    async def _broadcast_to_lobby(self, lobby_id: str, message: dict[str, Any]) -> None:
+        lobby_connections = self._connections.get(lobby_id, {})
+        for socket in list(lobby_connections.values()):
+            await socket.send_json(message)
+
+    def _find_player(self, game_state: GameState, player_id: str) -> PlayerState | None:
+        for player in game_state.players:
+            if player.player_id == player_id:
+                return player
+        return None
+
+    def _parse_trade_items(self, offered_items: dict[str, int]) -> dict[ItemType, int]:
+        parsed: dict[ItemType, int] = {}
+        for item_name, count in offered_items.items():
+            try:
+                item_type = ItemType(item_name)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid trade item '{item_name}'.",
+                ) from exc
+
+            parsed[item_type] = int(count)
+        return parsed
+
+    def _map_claim_role(self, token_role: str) -> VisibleRole:
+        role_map: dict[str, VisibleRole] = {
+            "Student": VisibleRole.STUDENT,
+            "Teacher": VisibleRole.CARETAKER,
+            "Parent": VisibleRole.CARETAKER,
+            "Admin": VisibleRole.GUARD,
+        }
+        return role_map.get(token_role, VisibleRole.STUDENT)
+
+    def _public_player_payload(self, player: PlayerState) -> dict[str, Any]:
+        return {
+            "player_id": player.player_id,
+            "visible_role": player.visible_role.value,
+            "inventory": {item.value: count for item, count in player.inventory.items()},
+            "mission_completed": player.mission_completed,
+        }
+
+    def _private_player_payload(self, player: PlayerState) -> dict[str, Any]:
+        return {
+            "player_id": player.player_id,
+            "visible_role": player.visible_role.value,
+            "is_carrier": player.is_carrier,
+            "health_status": player.health_status.value,
+            "inventory": {item.value: count for item, count in player.inventory.items()},
+            "mission_completed": player.mission_completed,
+        }
+
+    def _build_event_hints(self, current_event: LocationEvent) -> list[str]:
+        hints_map: dict[LocationEvent, list[str]] = {
+            LocationEvent.SCHOOL: [
+                "School protocol active: verify item counts before trading.",
+                "Crowd movement is moderate this round.",
+            ],
+            LocationEvent.PARK: [
+                "Open-air advantage: exposure pressure is lower.",
+                "Spacing trades out can reduce cumulative risk.",
+            ],
+            LocationEvent.CANTEEN: [
+                "Canteen crowding alert: infection checks are stricter.",
+                "Masks have higher tactical value in this event.",
+            ],
+            LocationEvent.CLINIC: [
+                "Clinic event: coordinate medicine exchanges efficiently.",
+                "Observe behavior cues before voting phases.",
+            ],
+            LocationEvent.MARKET: [
+                "Market surge: expect more frequent trade opportunities.",
+                "Track your mission items to avoid unnecessary risk.",
+            ],
+        }
+        return hints_map[current_event]
+
 
 router = APIRouter(prefix="/ws", tags=["game-sockets"])
 socket_hub = LobbySocketHub()
 
 
-@router.post("/lobby/{lobby_id}/init")
-async def init_lobby_manual(lobby_id: str, required_players: int | None = None) -> dict[str, object]:
-    """
-    Manually initialize a lobby with connected players (useful for testing).
-    Optional query parameter: required_players (defaults to 10).
-    """
-    game_manager = socket_hub._games.get(lobby_id)
-    if game_manager is None:
+@router.post("/lobby/{lobby_id}/start_event_timer")
+async def start_event_timer(lobby_id: str) -> dict[str, str]:
+    runtime = socket_hub._lobbies.get(lobby_id)
+    if runtime is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Lobby '{lobby_id}' does not exist or has no connections.",
+            detail=f"Lobby '{lobby_id}' does not exist.",
         )
 
-    if game_manager.players:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Lobby is already initialized.",
-        )
+    if runtime.timer_task is None or runtime.timer_task.done():
+        runtime.timer_task = asyncio.create_task(socket_hub.start_event_timer(lobby_id))
 
-    lobby_connections = socket_hub._connections.get(lobby_id, {})
-    if not lobby_connections:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No players are connected to this lobby.",
-        )
-
-    # If required_players not specified, default to 10.
-    if required_players is None:
-        required_players = 10
-
-    # Update the game manager's required player count if needed.
-    if required_players != game_manager.REQUIRED_PLAYERS:
-        game_manager.REQUIRED_PLAYERS = required_players
-
-    player_ids = list(lobby_connections.keys())
-    init_result = game_manager.initialize_game(player_ids)
-    
-    # Broadcast the initialized state to all connected players.
-    await socket_hub.broadcast_game_state(lobby_id)
-    
-    return init_result
+    return {"message": "Event timer started."}
 
 
 @router.websocket("/lobby/{lobby_id}")
@@ -329,15 +351,13 @@ async def connect_to_lobby(websocket: WebSocket, lobby_id: str, player_token: st
 
             if envelope.event == "request_trade":
                 await socket_hub.handle_trade(lobby_id, player_id, envelope.data)
-            elif envelope.event == "buy_item":
-                await socket_hub.handle_buy_item(lobby_id, player_id, envelope.data)
             else:
                 await websocket.send_json(
                     {
                         "event": "error",
                         "data": {
                             "detail": f"Unsupported event '{envelope.event}'.",
-                            "supported_events": ["request_trade", "buy_item"],
+                            "supported_events": ["request_trade"],
                         },
                     }
                 )

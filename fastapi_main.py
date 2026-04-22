@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.server.routes.admin_users import router as admin_users_router
 from app.server.routes.game_sockets import router as game_sockets_router
 
 
@@ -17,6 +18,7 @@ app.add_middleware(
 )
 
 app.include_router(game_sockets_router)
+app.include_router(admin_users_router)
 
 
 @app.get("/")

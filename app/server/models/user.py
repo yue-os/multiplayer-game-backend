@@ -9,6 +9,8 @@ class User(db.Model, TimestampMixin, PublicIdMixin):
     __tablename__ = 'users'
 
     id = db.Column(db.Integer, primary_key=True)
+    first_name = db.Column(db.String(80), nullable=False, default='')
+    last_name = db.Column(db.String(80), nullable=False, default='')
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
@@ -25,6 +27,8 @@ class User(db.Model, TimestampMixin, PublicIdMixin):
         return {
             "id": self.id,
             "public_id": self.public_id,
+            "first_name": self.first_name,
+            "last_name": self.last_name,
             "username": self.username,
             "email": self.email,
             "role": self.role,
@@ -103,6 +107,9 @@ class GameServer(db.Model, PublicIdMixin):
     port = db.Column(db.Integer, nullable=False)
     last_heartbeat = db.Column(db.Float, default=time.time)
     player_count = db.Column(db.Integer, default=0)
+    persistent = db.Column(db.Boolean, nullable=False, default=False)
+    owner_teacher_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    class_id = db.Column(db.Integer, db.ForeignKey('classes.id'), nullable=True)
 
     # Composite unique constraint to identify servers by IP:Port
     __table_args__ = (db.UniqueConstraint('ip', 'port', name='_server_ip_port_uc'),)

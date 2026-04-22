@@ -49,6 +49,59 @@ def _ensure_public_ids(app):
         db.session.execute(text(f"ALTER TABLE {table_name} ALTER COLUMN public_id SET NOT NULL"))
         db.session.commit()
 
+
+def _ensure_user_name_columns(app):
+    from app.server.models import user
+
+    inspector = inspect(db.engine)
+    if not inspector.has_table('users'):
+        return
+
+    columns = {col['name'] for col in inspector.get_columns('users')}
+
+    if 'first_name' not in columns:
+        db.session.execute(text("ALTER TABLE users ADD COLUMN first_name VARCHAR(80) DEFAULT ''"))
+        db.session.commit()
+
+    if 'last_name' not in columns:
+        db.session.execute(text("ALTER TABLE users ADD COLUMN last_name VARCHAR(80) DEFAULT ''"))
+        db.session.commit()
+
+    # Backfill nulls and enforce NOT NULL for stricter data consistency.
+    db.session.execute(text("UPDATE users SET first_name = '' WHERE first_name IS NULL"))
+    db.session.execute(text("UPDATE users SET last_name = '' WHERE last_name IS NULL"))
+    db.session.commit()
+
+    db.session.execute(text("ALTER TABLE users ALTER COLUMN first_name SET NOT NULL"))
+    db.session.execute(text("ALTER TABLE users ALTER COLUMN last_name SET NOT NULL"))
+    db.session.commit()
+
+
+def _ensure_game_server_columns(app):
+    inspector = inspect(db.engine)
+    if not inspector.has_table('game_servers'):
+        return
+
+    columns = {col['name'] for col in inspector.get_columns('game_servers')}
+
+    if 'persistent' not in columns:
+        db.session.execute(text("ALTER TABLE game_servers ADD COLUMN persistent BOOLEAN DEFAULT FALSE"))
+        db.session.commit()
+
+    if 'owner_teacher_id' not in columns:
+        db.session.execute(text("ALTER TABLE game_servers ADD COLUMN owner_teacher_id INTEGER"))
+        db.session.commit()
+
+    if 'class_id' not in columns:
+        db.session.execute(text("ALTER TABLE game_servers ADD COLUMN class_id INTEGER"))
+        db.session.commit()
+
+    db.session.execute(text("UPDATE game_servers SET persistent = FALSE WHERE persistent IS NULL"))
+    db.session.commit()
+
+    db.session.execute(text("ALTER TABLE game_servers ALTER COLUMN persistent SET NOT NULL"))
+    db.session.commit()
+
 def init_db(app):
     database_url = os.getenv('DATABASE_URL')
     if not database_url:
@@ -71,6 +124,8 @@ def init_db(app):
         try:
             # Create tables if they don't exist
             db.create_all()
+            _ensure_user_name_columns(app)
+            _ensure_game_server_columns(app)
             _ensure_public_ids(app)
 
             # Import seed function inside the context/function to avoid circular imports 
