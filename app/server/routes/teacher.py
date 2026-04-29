@@ -13,6 +13,7 @@ from app.server.models.user import (
     MissionProgress,
     PlaytimeLog,
     Quiz,
+    QuizQuestion,
     QuizResult,
     User,
 )
@@ -49,7 +50,12 @@ def class_overview():
 
     if not students:
         class_payload = [
-            {'id': classroom.id, 'public_id': classroom.public_id, 'name': classroom.name}
+            {
+                'id': classroom.id,
+                'public_id': classroom.public_id,
+                'name': classroom.name,
+                'teacher_id': classroom.teacher_id,
+            }
             for classroom in classes
         ]
         return jsonify({'classes': class_payload, 'students': [], 'parents': []}), 200
@@ -132,7 +138,12 @@ def class_overview():
 
     class_name_by_id = {classroom.id: classroom.name for classroom in classes}
     class_payload = [
-        {'id': classroom.id, 'public_id': classroom.public_id, 'name': classroom.name}
+        {
+            'id': classroom.id,
+            'public_id': classroom.public_id,
+            'name': classroom.name,
+            'teacher_id': classroom.teacher_id,
+        }
         for classroom in classes
     ]
 
@@ -157,25 +168,28 @@ def class_overview():
         )
 
         student_payload.append(
-            {
-                'student_id': student.id,
-                'student_public_id': student.public_id,
-                'username': student.username,
-                'class_id': student.class_id,
-                'class_name': class_name_by_id.get(student.class_id),
-                'parent_id': student.parent_id,
-                'parent_public_id': parent_map.get(student.parent_id).public_id if parent_map.get(student.parent_id) else None,
-                'parent_name': (
-                    (
-                        f"{(parent_map.get(student.parent_id).first_name or '').strip()} {(parent_map.get(student.parent_id).last_name or '').strip()}"
-                    ).strip()
-                    if parent_map.get(student.parent_id)
-                    else None
-                )
-                or (parent_map.get(student.parent_id).username if parent_map.get(student.parent_id) else None),
-                'missions': mission_summary,
-                'quizzes': quiz_summary,
-            }
+                {
+                    'id': student.id,
+                    'student_id': student.id,
+                    'student_public_id': student.public_id,
+                    'username': student.username,
+                    'first_name': student.first_name,
+                    'last_name': student.last_name,
+                    'class_id': student.class_id,
+                    'class_name': class_name_by_id.get(student.class_id),
+                    'parent_id': student.parent_id,
+                    'parent_public_id': parent_map.get(student.parent_id).public_id if parent_map.get(student.parent_id) else None,
+                    'parent_name': (
+                        (
+                            f"{(parent_map.get(student.parent_id).first_name or '').strip()} {(parent_map.get(student.parent_id).last_name or '').strip()}"
+                        ).strip()
+                        if parent_map.get(student.parent_id)
+                        else None
+                    )
+                    or (parent_map.get(student.parent_id).username if parent_map.get(student.parent_id) else None),
+                    'missions': mission_summary,
+                    'quizzes': quiz_summary,
+                }
         )
 
     return jsonify({'classes': class_payload, 'students': student_payload, 'parents': parent_payload}), 200
@@ -270,6 +284,8 @@ def create_quiz():
     title = (data.get('title') or '').strip()
     timer_seconds = data.get('timer_seconds', 300)
     start_date_raw = data.get('start_date')
+    class_id = data.get('class_id')
+    questions = data.get('questions', [])
 
     if not title:
         return jsonify({'error': 'title is required'}), 400
@@ -290,6 +306,12 @@ def create_quiz():
         return jsonify({'error': 'start_date must be a valid ISO-8601 datetime'}), 400
 
     teacher_id = int(request.current_user_id)
+    
+    # Validate class_id if provided
+    if class_id:
+        classroom = Class.query.filter_by(id=class_id, teacher_id=teacher_id).first()
+        if not classroom:
+            return jsonify({'error': 'Class not found or not owned by teacher'}), 404
 
     quiz = Quiz(
         teacher_id=teacher_id,
@@ -299,19 +321,60 @@ def create_quiz():
     )
 
     db.session.add(quiz)
+    db.session.flush()
+
+    # Persist questions to database
+    for idx, q in enumerate(questions):
+        if not isinstance(q, dict):
+            continue
+        question_text = (q.get('text') or '').strip()
+        if not question_text:
+            continue
+        question = QuizQuestion(
+            quiz_id=quiz.id,
+            type=str(q.get('type', 'multiple_choice')).strip(),
+            text=question_text,
+            options=q.get('options'),  # List of options for multiple choice
+            correct_answer=str(q.get('correct_answer', '')).strip() or None,
+            points=int(q.get('points', 1)) if q.get('points') else 1,
+            order=idx,
+        )
+        db.session.add(question)
+
     db.session.commit()
+
+    # Serialize persisted questions for response
+    questions_response = [
+        {
+            'id': q.id,
+            'type': q.type,
+            'text': q.text,
+            'options': q.options,
+            'correct_answer': q.correct_answer,
+            'points': q.points,
+            'order': q.order,
+        }
+        for q in quiz.questions
+    ]
+
+    # Store questions as JSON in the quiz data (if using a JSON field) or in a separate table
+    # For now, we'll just acknowledge the questions were received
+    quiz_data = {
+        'id': quiz.id,
+        'public_id': quiz.public_id,
+        'teacher_id': quiz.teacher_id,
+        'title': quiz.title,
+        'timer_seconds': quiz.timer_seconds,
+        'start_date': quiz.start_date.isoformat() if quiz.start_date else None,
+        'class_id': class_id,
+        'questions_count': len(quiz.questions),
+        'questions': questions_response,
+    }
 
     return jsonify(
         {
-            'message': 'Quiz created successfully',
-            'quiz': {
-                'id': quiz.id,
-                'public_id': quiz.public_id,
-                'teacher_id': quiz.teacher_id,
-                'title': quiz.title,
-                'timer_seconds': quiz.timer_seconds,
-                'start_date': quiz.start_date.isoformat() if quiz.start_date else None,
-            },
+            'message': 'Quiz created successfully with questions',
+            'quiz': quiz_data,
         }
     ), 201
 
@@ -324,18 +387,28 @@ def send_message():
         return guard
 
     data = request.get_json(silent=True) or {}
-    receiver_public_id = (data.get('receiver_public_id') or '').strip()
-    content = (data.get('content') or '').strip()
+    # Accept both receiver_public_id and student_id (for parent communication)
+    receiver_public_id = (data.get('receiver_public_id') or data.get('student_id') or '').strip()
+    content = (data.get('content') or data.get('message') or '').strip()
 
     if not receiver_public_id:
-        return jsonify({'error': 'receiver_public_id is required'}), 400
+        return jsonify({'error': 'receiver_public_id or student_id is required'}), 400
 
     if not content:
-        return jsonify({'error': 'content is required'}), 400
+        return jsonify({'error': 'content or message is required'}), 400
 
     teacher_id = int(request.current_user_id)
 
+    # Try to find receiver by public_id first, then by ID
     receiver = User.query.filter_by(public_id=receiver_public_id).first()
+    if not receiver:
+        # Try to find by ID (for when frontend sends numeric student_id)
+        try:
+            receiver_id = int(receiver_public_id)
+            receiver = User.query.get(receiver_id)
+        except (ValueError, TypeError):
+            pass
+    
     if not receiver:
         return jsonify({'error': 'Receiver not found'}), 404
 
@@ -384,6 +457,30 @@ def send_message():
             },
         }
     ), 201
+
+
+@teacher_bp.route('/teacher/announcement', methods=['POST'])
+@token_required
+def create_announcement():
+    guard = _teacher_guard()
+    if guard:
+        return guard
+
+    data = request.get_json(silent=True) or {}
+    class_id = data.get('class_id')
+    title = (data.get('title') or '').strip()
+    message = (data.get('message') or '').strip()
+
+    if not class_id or not title or not message:
+        return jsonify({'error': 'class_id, title, and message are required'}), 400
+
+    teacher_id = int(request.current_user_id)
+    classroom = Class.query.filter_by(id=class_id, teacher_id=teacher_id).first()
+    if not classroom:
+        return jsonify({'error': 'Class not found or not owned by teacher'}), 403
+
+    # Simple acknowledgement endpoint; frontend simulates displaying announcement locally.
+    return jsonify({'message': 'Announcement posted successfully', 'announcement': {'class_id': class_id, 'title': title, 'message': message}}), 201
 
 
 @teacher_bp.route('/teacher/lobby/create', methods=['POST'])
@@ -440,6 +537,7 @@ def create_lobby():
 
         existing.name = server_name
         existing.player_count = player_count
+        existing.required_players = max(2, player_count)
         existing.last_heartbeat = time.time()
         existing.persistent = True
         existing.owner_teacher_id = teacher_id
@@ -455,6 +553,7 @@ def create_lobby():
                     'ip': existing.ip,
                     'port': existing.port,
                     'player_count': existing.player_count,
+                    'required_players': existing.required_players,
                     'persistent': existing.persistent,
                     'owner_teacher_id': existing.owner_teacher_id,
                     'class_id': classroom.id,
@@ -470,6 +569,7 @@ def create_lobby():
         ip=ip,
         port=port,
         player_count=player_count,
+        required_players=max(2, player_count),
         last_heartbeat=time.time(),
         persistent=True,
         owner_teacher_id=teacher_id,
@@ -488,6 +588,7 @@ def create_lobby():
                 'ip': lobby.ip,
                 'port': lobby.port,
                 'player_count': lobby.player_count,
+                'required_players': lobby.required_players,
                 'persistent': lobby.persistent,
                 'owner_teacher_id': lobby.owner_teacher_id,
                 'class_id': classroom.id,
@@ -521,6 +622,7 @@ def list_teacher_lobbies():
                 'ip': lobby.ip,
                 'port': lobby.port,
                 'player_count': lobby.player_count,
+                'required_players': lobby.required_players,
                 'persistent': lobby.persistent,
                 'class_id': lobby.class_id,
                 'class_public_id': classroom.public_id if classroom else None,
@@ -547,3 +649,33 @@ def delete_teacher_lobby(lobby_public_id: str):
     db.session.delete(lobby)
     db.session.commit()
     return jsonify({'message': 'Lobby removed successfully', 'public_id': lobby_public_id}), 200
+
+
+@teacher_bp.route('/teacher/class', methods=['POST'])
+@token_required
+def create_class():
+    guard = _teacher_guard()
+    if guard:
+        return guard
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()
+
+    if not name:
+        return jsonify({'error': 'Class name is required'}), 400
+
+    teacher_id = int(request.current_user_id)
+
+    # Create the new class in the database
+    new_class = Class(name=name, teacher_id=teacher_id)
+    db.session.add(new_class)
+    db.session.commit()
+
+    return jsonify({
+        'message': 'Class created successfully!',
+        'class': {
+            'id': new_class.id,
+            'name': new_class.name,
+            'public_id': new_class.public_id
+        }
+    }), 201

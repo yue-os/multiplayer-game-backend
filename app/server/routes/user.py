@@ -47,10 +47,47 @@ def login():
     user = User.query.filter_by(username=username).first()
 
     if user and check_password_hash(user.password_hash, password):
+        # Check if student is connected to a parent
+        if user.role == 'Student' and user.parent_id is None:
+            return jsonify({'error': 'Student account must be linked to a parent to play. Please ask your parent to link your account first.'}), 403
+        
         token = signJWT(str(user.id), user.role)
         return jsonify(token), 200
 
     return jsonify({'error': 'Invalid credentials'}), 401
+
+
+@user_bp.route('/user/profile', methods=['PATCH'])
+@token_required
+def update_own_profile():
+    data = request.json or {}
+    current_user_id = int(request.current_user_id)
+
+    user = User.query.get(current_user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    first_name = str(data.get('first_name', user.first_name)).strip()
+    last_name = str(data.get('last_name', user.last_name)).strip()
+    username = str(data.get('username', user.username)).strip()
+    email = str(data.get('email', user.email)).strip()
+
+    if first_name == '' or last_name == '' or username == '' or email == '':
+        return jsonify({'error': 'first_name, last_name, username, and email are required'}), 400
+
+    conflict = User.query.filter(
+        ((User.username == username) | (User.email == email)) & (User.id != user.id)
+    ).first()
+    if conflict:
+        return jsonify({'error': 'Another user already uses the same username or email'}), 409
+
+    user.first_name = first_name
+    user.last_name = last_name
+    user.username = username
+    user.email = email
+
+    db.session.commit()
+    return jsonify({'message': 'Profile updated successfully', 'user': user.to_dict()}), 200
 
 @user_bp.route('/parent/link_child', methods=['POST'])
 @token_required

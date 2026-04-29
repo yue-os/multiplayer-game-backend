@@ -22,6 +22,17 @@ def register_server():
     port = data.get("port")
     name = data.get("name", "Unknown Server")
     count = data.get("count", 0)
+    required_players = data.get("required_players", 2)
+
+    try:
+        count = max(0, int(count))
+    except (TypeError, ValueError):
+        count = 0
+
+    try:
+        required_players = max(1, int(required_players))
+    except (TypeError, ValueError):
+        required_players = 2
 
     if advertised_ip == "":
         advertised_ip = client_ip
@@ -32,6 +43,7 @@ def register_server():
     if server:
         server.last_heartbeat = time.time()
         server.player_count = count
+        server.required_players = required_players
         server.name = name # Update name if changed
     else:
         server = GameServer(
@@ -39,6 +51,7 @@ def register_server():
             port=port, 
             name=name, 
             player_count=count,
+            required_players=required_players,
             last_heartbeat=time.time()
         )
         db.session.add(server)
@@ -62,12 +75,39 @@ def list_servers():
     
     server_list = []
     for s in active_servers:
+        is_teacher_lobby = bool(s.persistent and s.owner_teacher_id is not None)
+        is_recently_active = bool(s.last_heartbeat and s.last_heartbeat > cutoff)
+        is_online = is_recently_active or is_teacher_lobby
+
+        # Teacher lobbies are always listed online; if no active heartbeat yet,
+        # treat current players as 0 and keep room in "Not yet started" state.
+        current_players = int(s.player_count or 0) if is_recently_active else 0
+        required_players = max(1, int(s.required_players or 2))
+        if is_teacher_lobby and required_players < 2:
+            required_players = 2
+
+        # Started means the room is actively running and has reached a playable threshold.
+        is_started = is_recently_active and current_players >= required_players
+
+        if is_started:
+            status = 'Started'
+        elif is_online:
+            status = 'Not yet started'
+        else:
+            status = 'Offline'
+
         server_list.append({
             "ip": s.ip,
             "port": s.port,
             "name": s.name,
-            "count": s.player_count,
-            "persistent": bool(s.persistent)
+            "count": current_players,
+            "persistent": bool(s.persistent),
+            "online": is_online,
+            "joinable": is_online,
+            "current_players": current_players,
+            "required_players": required_players,
+            "started": is_started,
+            "status": status
         })
         
     return jsonify(server_list), 200

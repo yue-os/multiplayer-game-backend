@@ -96,10 +96,20 @@ def _ensure_game_server_columns(app):
         db.session.execute(text("ALTER TABLE game_servers ADD COLUMN class_id INTEGER"))
         db.session.commit()
 
+    if 'required_players' not in columns:
+        db.session.execute(text("ALTER TABLE game_servers ADD COLUMN required_players INTEGER DEFAULT 2"))
+        db.session.commit()
+
     db.session.execute(text("UPDATE game_servers SET persistent = FALSE WHERE persistent IS NULL"))
     db.session.commit()
 
+    db.session.execute(text("UPDATE game_servers SET required_players = 2 WHERE required_players IS NULL OR required_players < 1"))
+    db.session.commit()
+
     db.session.execute(text("ALTER TABLE game_servers ALTER COLUMN persistent SET NOT NULL"))
+    db.session.commit()
+
+    db.session.execute(text("ALTER TABLE game_servers ALTER COLUMN required_players SET NOT NULL"))
     db.session.commit()
 
 def init_db(app):

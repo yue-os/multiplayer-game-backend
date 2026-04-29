@@ -78,6 +78,19 @@ class Quiz(db.Model, TimestampMixin, PublicIdMixin):
     title = db.Column(db.String(100), nullable=False)
     timer_seconds = db.Column(db.Integer, default=300)
     start_date = db.Column(db.DateTime, default=datetime.utcnow)
+    questions = db.relationship('QuizQuestion', backref='quiz', cascade='all, delete-orphan', lazy=True)
+
+class QuizQuestion(db.Model, TimestampMixin, PublicIdMixin):
+    __tablename__ = 'quiz_questions'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    quiz_id = db.Column(db.Integer, db.ForeignKey('quizzes.id'), nullable=False)
+    type = db.Column(db.String(50), default='multiple_choice')  # multiple_choice, true_false, short_answer
+    text = db.Column(db.Text, nullable=False)
+    options = db.Column(db.JSON, nullable=True)  # For multiple choice: ['option1', 'option2', ...]
+    correct_answer = db.Column(db.String(255), nullable=True)  # Index or text of correct answer
+    points = db.Column(db.Integer, default=1)
+    order = db.Column(db.Integer, default=0)  # For maintaining question order
 
 class QuizResult(db.Model, TimestampMixin, PublicIdMixin):
     __tablename__ = 'quiz_results'
@@ -107,6 +120,7 @@ class GameServer(db.Model, PublicIdMixin):
     port = db.Column(db.Integer, nullable=False)
     last_heartbeat = db.Column(db.Float, default=time.time)
     player_count = db.Column(db.Integer, default=0)
+    required_players = db.Column(db.Integer, nullable=False, default=2)
     persistent = db.Column(db.Boolean, nullable=False, default=False)
     owner_teacher_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     class_id = db.Column(db.Integer, db.ForeignKey('classes.id'), nullable=True)
