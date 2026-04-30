@@ -24,6 +24,13 @@ def token_required(f):
         request.current_user_id = payload['user_id']
         request.current_user_role = payload['role']
 
+        if request.path != '/auth/change-password':
+            from app.server.models.user import User
+
+            user = User.query.get(int(payload['user_id']))
+            if user and getattr(user, 'must_change_password', False):
+                return jsonify({'error': 'Password change required'}), 403
+
         return f(*args, **kwargs)
 
     return decorated

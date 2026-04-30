@@ -14,6 +14,7 @@ class User(db.Model, TimestampMixin, PublicIdMixin):
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(255), nullable=False)
+    must_change_password = db.Column(db.Boolean, nullable=False, default=False)
     role = db.Column(db.String(20), nullable=False) # Admin, Teacher, Parent, Student
     
     # Relationship: Parent -> Student (One Parent can have many Students/Children)
@@ -31,6 +32,7 @@ class User(db.Model, TimestampMixin, PublicIdMixin):
             "last_name": self.last_name,
             "username": self.username,
             "email": self.email,
+            "must_change_password": self.must_change_password,
             "role": self.role,
             "parent_id": self.parent_id,
             "class_id": self.class_id

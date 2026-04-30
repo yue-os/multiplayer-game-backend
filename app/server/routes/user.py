@@ -41,20 +41,68 @@ def register():
 @user_bp.route('/auth/login', methods=['POST'])
 def login():
     data = request.json
-    username = data.get('username')
-    password = data.get('password')
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+    print('[auth/login] username=', username)
 
     user = User.query.filter_by(username=username).first()
 
-    if user and check_password_hash(user.password_hash, password):
+    password_matches = False
+    if user:
+        try:
+            password_matches = check_password_hash(user.password_hash, password)
+        except ValueError:
+            password_matches = False
+
+    if user and password_matches:
         # Check if student is connected to a parent
         if user.role == 'Student' and user.parent_id is None:
             return jsonify({'error': 'Student account must be linked to a parent to play. Please ask your parent to link your account first.'}), 403
         
         token = signJWT(str(user.id), user.role)
-        return jsonify(token), 200
+        payload = dict(token)
+        payload['must_change_password'] = bool(getattr(user, 'must_change_password', False))
+        payload['mustChangePassword'] = payload['must_change_password']
+        payload['user'] = user.to_dict()
+        return jsonify(payload), 200
 
     return jsonify({'error': 'Invalid credentials'}), 401
+
+
+@user_bp.route('/user/profile', methods=['GET'])
+@token_required
+def get_own_profile():
+    user = User.query.get(int(request.current_user_id))
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    payload = user.to_dict()
+    print('[user/profile:get] user_id=', user.id, 'role=', user.role)
+    return jsonify(payload), 200
+
+
+@user_bp.route('/auth/change-password', methods=['POST'])
+@token_required
+def change_password():
+    data = request.json or {}
+    current_password = data.get('current_password') or ''
+    new_password = data.get('new_password') or ''
+
+    if len(new_password) < 8:
+        return jsonify({'error': 'New password must be at least 8 characters'}), 400
+
+    user = User.query.get(int(request.current_user_id))
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    if not check_password_hash(user.password_hash, current_password):
+        return jsonify({'error': 'Current password is incorrect'}), 401
+
+    user.password_hash = generate_password_hash(new_password)
+    user.must_change_password = False
+    db.session.commit()
+
+    return jsonify({'message': 'Password changed successfully'}), 200
 
 
 @user_bp.route('/user/profile', methods=['PATCH'])

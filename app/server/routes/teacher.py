@@ -35,10 +35,19 @@ def class_overview():
         return guard
 
     teacher_id = int(request.current_user_id)
+    teacher = User.query.get(teacher_id)
+    teacher_profile = {
+        'id': teacher.id,
+        'public_id': teacher.public_id,
+        'username': teacher.username,
+        'first_name': teacher.first_name,
+        'last_name': teacher.last_name,
+        'email': teacher.email,
+    } if teacher else None
     classes = Class.query.filter_by(teacher_id=teacher_id).all()
 
     if not classes:
-        return jsonify({'classes': [], 'students': [], 'parents': []}), 200
+        return jsonify({'profile': teacher_profile, 'classes': [], 'students': [], 'parents': []}), 200
 
     class_ids = [classroom.id for classroom in classes]
 
@@ -58,7 +67,7 @@ def class_overview():
             }
             for classroom in classes
         ]
-        return jsonify({'classes': class_payload, 'students': [], 'parents': []}), 200
+        return jsonify({'profile': teacher_profile, 'classes': class_payload, 'students': [], 'parents': []}), 200
 
     student_ids = [student.id for student in students]
 
@@ -192,7 +201,7 @@ def class_overview():
                 }
         )
 
-    return jsonify({'classes': class_payload, 'students': student_payload, 'parents': parent_payload}), 200
+    return jsonify({'profile': teacher_profile, 'classes': class_payload, 'students': student_payload, 'parents': parent_payload}), 200
 
 
 @teacher_bp.route('/teacher/student/<string:student_public_id>', methods=['GET'])

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+import re
+import secrets
 from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
@@ -16,10 +18,23 @@ from app.server.models.user import Class, GameServer, MissionProgress, PlaytimeL
 admin_users_bp = Blueprint("admin_users", __name__)
 
 ALLOWED_ROLES = {"Admin", "Teacher", "Parent", "Student"}
+ROLE_BY_LOWER = {role.lower(): role for role in ALLOWED_ROLES}
+CSV_ALLOWED_ROLES = {"Teacher", "Parent", "Student"}
 
 
 def _serialize_user(user: User) -> dict[str, object]:
     classroom = Class.query.get(user.class_id) if user.class_id is not None else None
+    teacher_classes = []
+    if user.role == "Teacher":
+        teacher_classes = [
+            {
+                "id": classroom.id,
+                "public_id": classroom.public_id,
+                "name": classroom.name,
+            }
+            for classroom in Class.query.filter_by(teacher_id=user.id).order_by(Class.name.asc()).all()
+        ]
+
     return {
         "id": user.id,
         "public_id": user.public_id,
@@ -27,28 +42,102 @@ def _serialize_user(user: User) -> dict[str, object]:
         "last_name": user.last_name,
         "username": user.username,
         "email": user.email,
+        "must_change_password": user.must_change_password,
+        "mustChangePassword": user.must_change_password,
         "role": user.role,
         "class_id": user.class_id,
         "class_name": classroom.name if classroom is not None else None,
         "parent_id": user.parent_id,
+        "classes": teacher_classes,
     }
 
 
 def _serialize_class(classroom: Class) -> dict[str, object]:
     teacher = User.query.get(classroom.teacher_id)
-    student_count = User.query.filter_by(class_id=classroom.id, role="Student").count()
+    students = User.query.filter_by(class_id=classroom.id, role="Student").order_by(User.id.asc()).all()
     return {
         "id": classroom.id,
         "public_id": classroom.public_id,
         "name": classroom.name,
         "teacher_id": classroom.teacher_id,
         "teacher_username": teacher.username if teacher is not None else "",
-        "student_count": student_count,
+        "student_count": len(students),
+        "student_ids": [student.id for student in students],
     }
 
 
 def _full_name(user: User) -> str:
     return f"{(user.first_name or '').strip()} {(user.last_name or '').strip()}".strip() or user.username
+
+
+def _slugify_username(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "", value.lower())
+    return slug or f"user{secrets.token_hex(3)}"
+
+
+def _unique_username(base: str) -> str:
+    username = _slugify_username(base)
+    if not User.query.filter_by(username=username).first():
+        return username
+
+    for _ in range(20):
+        candidate = f"{username}{secrets.randbelow(9000) + 1000}"
+        if not User.query.filter_by(username=candidate).first():
+            return candidate
+
+    return f"{username}{secrets.token_hex(4)}"
+
+
+def _unique_bulk_username(first_name: str, last_name: str, reserved_usernames: set[str]) -> str:
+    base = _slugify_username(f"{first_name}{last_name}")
+    for _ in range(100):
+        candidate = f"{base}{secrets.randbelow(900) + 100}"
+        normalized = candidate.lower()
+        if normalized in reserved_usernames:
+            continue
+        if not User.query.filter_by(username=candidate).first():
+            reserved_usernames.add(normalized)
+            return candidate
+    return _unique_username(base)
+
+
+def _temporary_password() -> str:
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*"
+    return "".join(secrets.choice(alphabet) for _ in range(12))
+
+
+def _valid_email(value: str) -> bool:
+    return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", value))
+
+
+def _split_name(full_name: str) -> tuple[str, str]:
+    parts = [part for part in full_name.strip().split() if part]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], parts[0]
+    return parts[0], " ".join(parts[1:])
+
+
+def _normalize_import_row(row: dict[str, object]) -> dict[str, object]:
+    aliases = {
+        "fullname": "name",
+        "full_name": "name",
+        "first name": "first_name",
+        "firstname": "first_name",
+        "last name": "last_name",
+        "lastname": "last_name",
+        "e-mail": "email",
+        "mail": "email",
+        "user_name": "username",
+        "user name": "username",
+    }
+    normalized = {}
+    for key, value in row.items():
+        clean_key = str(key).lstrip("\ufeff").strip().lower().replace(" ", "_")
+        clean_key = aliases.get(clean_key, clean_key)
+        normalized[clean_key] = value
+    return normalized
 
 
 def _completion_rate(missions_total: int, missions_completed: int) -> float:
@@ -87,6 +176,7 @@ def create_class():
         return jsonify({"error": "Unauthorized"}), 403
 
     data = request.json or {}
+    print("[admin/classes:create] payload=", data)
     name = str(data.get("name", "")).strip()
     teacher_id = data.get("teacher_id")
     student_ids = data.get("student_ids") or []
@@ -97,7 +187,11 @@ def create_class():
     if not isinstance(student_ids, list):
         return jsonify({"error": "student_ids must be a list"}), 400
 
-    teacher = User.query.get(int(teacher_id))
+    try:
+        teacher = User.query.get(int(teacher_id))
+    except (TypeError, ValueError):
+        return jsonify({"error": "teacher_id must be a valid teacher ID"}), 400
+
     if teacher is None or teacher.role != "Teacher":
         return jsonify({"error": "Teacher not found"}), 404
 
@@ -108,7 +202,10 @@ def create_class():
 
     assigned_students = []
     for student_id in student_ids:
-        student = User.query.get(int(student_id))
+        try:
+            student = User.query.get(int(student_id))
+        except (TypeError, ValueError):
+            continue
         if student is None or student.role != "Student":
             continue
         student.class_id = classroom.id
@@ -118,6 +215,7 @@ def create_class():
 
     payload = _serialize_class(classroom)
     payload["student_ids"] = assigned_students
+    print("[admin/classes:create] created=", payload)
     return jsonify({"message": "Class created successfully.", "class": payload}), 201
 
 
@@ -141,6 +239,76 @@ def delete_class(class_id: int):
     return jsonify({"message": "Class deleted successfully.", "class_id": class_id}), 200
 
 
+@admin_users_bp.route("/api/admin/classes/<int:class_id>", methods=["PUT", "PATCH"])
+@token_required
+def update_class(class_id: int):
+    if request.current_user_role != "Admin":
+        return jsonify({"error": "Unauthorized"}), 403
+
+    classroom = Class.query.get(class_id)
+    if classroom is None:
+        return jsonify({"error": "Class not found"}), 404
+
+    data = request.json or {}
+    name = str(data.get("name", classroom.name) or "").strip()
+    teacher_id = data.get("teacher_id", classroom.teacher_id)
+    student_ids = data.get("student_ids")
+
+    if not name:
+        return jsonify({"error": "name is required"}), 400
+
+    try:
+        teacher_id = int(teacher_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "teacher_id must be a valid teacher ID"}), 400
+
+    teacher = User.query.get(teacher_id)
+    if teacher is None or teacher.role != "Teacher":
+        return jsonify({"error": "Teacher not found"}), 404
+
+    classroom.name = name
+    classroom.teacher_id = teacher.id
+
+    assigned_students: list[int] = []
+    if student_ids is not None:
+        if not isinstance(student_ids, list):
+            return jsonify({"error": "student_ids must be a list"}), 400
+
+        normalized_student_ids: set[int] = set()
+        for student_id in student_ids:
+            try:
+                normalized_student_ids.add(int(student_id))
+            except (TypeError, ValueError):
+                return jsonify({"error": "student_ids must contain only valid IDs"}), 400
+
+        current_students = User.query.filter_by(class_id=classroom.id, role="Student").all()
+        for student in current_students:
+            if student.id not in normalized_student_ids:
+                student.class_id = None
+
+        if normalized_student_ids:
+            selected_students = User.query.filter(
+                User.id.in_(normalized_student_ids),
+                User.role == "Student",
+            ).all()
+            valid_student_ids = {student.id for student in selected_students}
+            missing_student_ids = normalized_student_ids - valid_student_ids
+            if missing_student_ids:
+                return jsonify({"error": "One or more selected students were not found"}), 404
+
+            for student in selected_students:
+                student.class_id = classroom.id
+                assigned_students.append(student.id)
+
+    db.session.commit()
+
+    payload = _serialize_class(classroom)
+    if student_ids is not None:
+        payload["student_ids"] = sorted(assigned_students)
+
+    return jsonify({"message": "Class updated successfully.", "class": payload}), 200
+
+
 @admin_users_bp.route("/api/admin/users", methods=["POST"])
 @token_required
 def create_user():
@@ -148,6 +316,7 @@ def create_user():
         return jsonify({"error": "Unauthorized"}), 403
 
     data = request.json or {}
+    print("[admin/users:create] payload=", {**data, "password": "***" if data.get("password") else ""})
     first_name = str(data.get("first_name", "")).strip()
     last_name = str(data.get("last_name", "")).strip()
     username = str(data.get("username", "")).strip()
@@ -155,8 +324,19 @@ def create_user():
     password = str(data.get("password", "")).strip()
     role = str(data.get("role", "")).strip()
 
-    if not first_name or not last_name or not username or not email or not password or role not in ALLOWED_ROLES:
+    if not first_name or not last_name or not email or role not in ALLOWED_ROLES:
         return jsonify({"error": "Invalid payload"}), 400
+
+    if not _valid_email(email):
+        return jsonify({"error": "Invalid email address"}), 400
+
+    if not username:
+        username = _unique_username(f"{first_name}{last_name}")
+
+    generated_password = False
+    if not password:
+        password = _temporary_password()
+        generated_password = True
 
     if User.query.filter((User.username == username) | (User.email == email)).first():
         return jsonify({"error": "User already exists"}), 409
@@ -167,6 +347,7 @@ def create_user():
         username=username,
         email=email,
         password_hash=generate_password_hash(password),
+        must_change_password=generated_password,
         role=role,
     )
 
@@ -177,7 +358,14 @@ def create_user():
         db.session.rollback()
         return jsonify({"error": "Unable to create user"}), 409
 
-    return jsonify(_serialize_user(user)), 201
+    response = _serialize_user(user)
+    if generated_password:
+        response["credentials"] = {
+            "username": username,
+            "temp_password": password,
+        }
+    print("[admin/users:create] created=", {**response, "credentials": "***" if generated_password else None})
+    return jsonify(response), 201
 
 
 @admin_users_bp.route("/api/admin/users/bulk-create", methods=["POST"])
@@ -192,24 +380,47 @@ def bulk_create_users():
         return jsonify({"error": "No users provided"}), 400
 
     created = []
+    credentials = []
     errors = []
+    reserved_usernames: set[str] = set()
+    seen_emails: set[str] = set()
 
     for idx, u in enumerate(users):
         try:
+            if not isinstance(u, dict):
+                errors.append({"index": idx, "error": "row must be an object"})
+                continue
+
+            u = _normalize_import_row(u)
             first_name = str(u.get("first_name", "")).strip()
             last_name = str(u.get("last_name", "")).strip()
-            username = str(u.get("username", "")).strip()
-            email = str(u.get("email", "")).strip()
-            password = str(u.get("password", "")).strip()
-            role = str(u.get("role", "Student")).strip()
+            email = str(u.get("email", "")).strip().lower()
+            raw_role = str(u.get("role", "")).strip()
+            role = ROLE_BY_LOWER.get(raw_role.lower(), raw_role)
 
-            if not first_name or not last_name or not username or not email or not password or role not in ALLOWED_ROLES:
-                errors.append({"index": idx, "error": "invalid payload"})
+            if not first_name or not last_name or not email or not raw_role:
+                errors.append({"index": idx, "error": "missing required first_name, last_name, email, or role", "email": email})
                 continue
 
-            if User.query.filter((User.username == username) | (User.email == email)).first():
-                errors.append({"index": idx, "error": "user exists", "username": username})
+            if not _valid_email(email):
+                errors.append({"index": idx, "error": "invalid email address", "email": email})
                 continue
+
+            if email in seen_emails:
+                errors.append({"index": idx, "error": "duplicate email in uploaded CSV", "email": email})
+                continue
+            seen_emails.add(email)
+
+            if role not in CSV_ALLOWED_ROLES:
+                errors.append({"index": idx, "error": f"CSV upload only supports {', '.join(sorted(CSV_ALLOWED_ROLES))} roles", "email": email})
+                continue
+
+            if User.query.filter_by(email=email).first():
+                errors.append({"index": idx, "error": "user with this email already exists", "email": email})
+                continue
+
+            username = _unique_bulk_username(first_name, last_name, reserved_usernames)
+            password = _temporary_password()
 
             user = User(
                 first_name=first_name,
@@ -217,22 +428,28 @@ def bulk_create_users():
                 username=username,
                 email=email,
                 password_hash=generate_password_hash(password),
+                must_change_password=True,
                 role=role,
             )
             db.session.add(user)
-            db.session.flush()
+            db.session.commit()
             created.append(_serialize_user(user))
-        except Exception as exc:
+            credentials.append(
+                {
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "username": username,
+                    "temp_password": password,
+                }
+            )
+        except IntegrityError as ie:
             db.session.rollback()
-            errors.append({"index": idx, "error": str(exc)})
+            errors.append({"index": idx, "error": f"Database integrity error: {str(ie)}", "email": u.get("email", "N/A")})
+        except Exception as exc:
+            db.session.rollback() # Rollback any partial changes for this user
+            errors.append({"index": idx, "error": str(exc), "email": u.get("email", "N/A")})
 
-    try:
-        db.session.commit()
-    except IntegrityError:
-        db.session.rollback()
-        return jsonify({"error": "Unable to create users due to integrity error"}), 409
-
-    return jsonify({"created": created, "errors": errors}), 201
+    return jsonify({"created": created, "credentials": credentials, "errors": errors}), 201
 
 
 @admin_users_bp.route("/api/admin/users", methods=["GET"])
@@ -295,6 +512,7 @@ def update_user(user_id: int):
     user.role = role
     if password:
         user.password_hash = generate_password_hash(password)
+        user.must_change_password = False
 
     db.session.commit()
     return jsonify(_serialize_user(user)), 200

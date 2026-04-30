@@ -67,6 +67,16 @@ def _ensure_user_name_columns(app):
         db.session.execute(text("ALTER TABLE users ADD COLUMN last_name VARCHAR(80) DEFAULT ''"))
         db.session.commit()
 
+    if 'must_change_password' not in columns:
+        db.session.execute(text("ALTER TABLE users ADD COLUMN must_change_password BOOLEAN DEFAULT FALSE"))
+        db.session.commit()
+        columns.add('must_change_password')
+
+    if 'temporary_password' in columns:
+        db.session.execute(text("UPDATE users SET temporary_password = NULL WHERE temporary_password IS NOT NULL"))
+    db.session.execute(text("UPDATE users SET must_change_password = FALSE WHERE must_change_password IS NULL"))
+    db.session.commit()
+
     # Backfill nulls and enforce NOT NULL for stricter data consistency.
     db.session.execute(text("UPDATE users SET first_name = '' WHERE first_name IS NULL"))
     db.session.execute(text("UPDATE users SET last_name = '' WHERE last_name IS NULL"))
@@ -74,6 +84,7 @@ def _ensure_user_name_columns(app):
 
     db.session.execute(text("ALTER TABLE users ALTER COLUMN first_name SET NOT NULL"))
     db.session.execute(text("ALTER TABLE users ALTER COLUMN last_name SET NOT NULL"))
+    db.session.execute(text("ALTER TABLE users ALTER COLUMN must_change_password SET NOT NULL"))
     db.session.commit()
 
 
