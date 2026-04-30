@@ -31,7 +31,7 @@ Create a `.env` file in the root directory.
 # Local PostgreSQL Connection
 # Format: postgresql://[user]:[password]@[host]:[port]/[database]
 # Example (local default):
-DATABASE_URL=postgresql://postgres:your_database_password@localhost:5432/postgres
+DATABASE_URL=postgresql://postgres:your_database_password@127.0.0.1:5432/postgres
 
 # Security
 SECRET_KEY=dev_secret_key_change_in_prod

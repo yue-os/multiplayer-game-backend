@@ -83,10 +83,7 @@ class LobbySocketHub:
 
         lobby_connections.pop(player_id, None)
         if not lobby_connections:
-            self._connections.pop(lobby_id, None)
-            runtime = self._lobbies.pop(lobby_id, None)
-            if runtime is not None and runtime.timer_task is not None:
-                runtime.timer_task.cancel()
+            self._cleanup_lobby(lobby_id)
 
     async def handle_trade(self, lobby_id: str, player_id: str, payload: dict[str, Any]) -> None:
         runtime = self._get_lobby_runtime_or_raise(lobby_id)
@@ -147,7 +144,7 @@ class LobbySocketHub:
             },
         )
 
-    async def broadcast_game_state(self, lobby_id: str) -> None:
+    async def broadcast_game_state(self, lobby_id: str, game_over: bool = False, scores: list[dict] | None = None) -> None:
         runtime = self._get_lobby_runtime_or_raise(lobby_id)
         lobby_connections = self._connections.get(lobby_id, {})
         if not lobby_connections:
@@ -160,28 +157,36 @@ class LobbySocketHub:
             if recipient is None:
                 continue
 
-            payload = {
-                "event": "game_state",
-                "data": {
-                    "lobby_id": lobby_id,
-                    "current_event": runtime.game_state.current_event.value,
-                    "lockdown_meter": runtime.game_state.lockdown_meter,
-                    "public_players": players_public,
-                    "you": self._private_player_payload(recipient),
-                },
+            data: dict[str, object] = {
+                "lobby_id": lobby_id,
+                "current_event": runtime.game_state.current_event.value,
+                "lockdown_meter": runtime.game_state.lockdown_meter,
+                "round": runtime.game_state.current_round,
+                "max_rounds": runtime.game_state.max_rounds,
+                "public_players": players_public,
+                "you": self._private_player_payload(recipient),
             }
 
-            await recipient_socket.send_json(payload)
+            if game_over:
+                data["game_over"] = True
+                data["scores"] = scores or []
+
+            await recipient_socket.send_json({"event": "game_state", "data": data})
 
     async def start_event_timer(self, lobby_id: str) -> None:
         while True:
             await asyncio.sleep(60)
+
             if lobby_id not in self._lobbies:
                 return
             if not self._connections.get(lobby_id):
                 return
 
             runtime = self._lobbies[lobby_id]
+            runtime.game_state.current_round += 1
+            current_round = runtime.game_state.current_round
+            max_rounds = runtime.game_state.max_rounds
+
             announcement = runtime.engine.rotate_event()
             hints = self._build_event_hints(runtime.game_state.current_event)
 
@@ -193,11 +198,25 @@ class LobbySocketHub:
                         "current_event": runtime.game_state.current_event.value,
                         "announcement": announcement,
                         "hints": hints,
+                        "round": current_round,
+                        "max_rounds": max_rounds,
                     },
                 },
             )
 
+            if current_round >= max_rounds:
+                scores = runtime.engine.compute_scores()
+                await self.broadcast_game_state(lobby_id, game_over=True, scores=scores)
+                self._cleanup_lobby(lobby_id)
+                return
+
             await self.broadcast_game_state(lobby_id)
+
+    def _cleanup_lobby(self, lobby_id: str) -> None:
+        runtime = self._lobbies.pop(lobby_id, None)
+        if runtime is not None and runtime.timer_task is not None:
+            runtime.timer_task.cancel()
+        self._connections.pop(lobby_id, None)
 
     def _parse_player_token(self, player_token: str) -> dict[str, str]:
         if player_token.strip() == "":

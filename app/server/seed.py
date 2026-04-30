@@ -89,3 +89,10 @@ def seed_database():
     print(" - Teacher: Mr.Smith / teach123")
     print(" - Parent: ParentJane / parent123")
     print(" - Student: Timmy / timmy123")
+
+if __name__ == "__main__":
+    # This allows running the script manually from the project root
+    from app.server.app import create_app
+    app = create_app()
+    with app.app_context():
+        seed_database()

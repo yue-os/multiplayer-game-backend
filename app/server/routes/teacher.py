@@ -21,6 +21,34 @@ from app.server.models.user import (
 teacher_bp = Blueprint('teacher', __name__)
 
 
+def _serialize_quiz_question(question: QuizQuestion):
+    return {
+        'id': question.id,
+        'public_id': question.public_id,
+        'type': question.type,
+        'text': question.text,
+        'options': question.options,
+        'correct_answer': question.correct_answer,
+        'points': question.points,
+        'order': question.order,
+    }
+
+
+def _serialize_quiz(quiz: Quiz):
+    ordered_questions = sorted(quiz.questions or [], key=lambda question: (question.order or 0, question.id or 0))
+    return {
+        'id': quiz.id,
+        'public_id': quiz.public_id,
+        'teacher_id': quiz.teacher_id,
+        'class_id': quiz.class_id,
+        'title': quiz.title,
+        'timer_seconds': quiz.timer_seconds,
+        'start_date': quiz.start_date.isoformat() if quiz.start_date else None,
+        'questions_count': len(ordered_questions),
+        'questions': [_serialize_quiz_question(question) for question in ordered_questions],
+    }
+
+
 def _teacher_guard():
     if request.current_user_role != 'Teacher':
         return jsonify({'error': 'Unauthorized'}), 403
@@ -312,9 +340,11 @@ def create_quiz():
         classroom = Class.query.filter_by(id=class_id, teacher_id=teacher_id).first()
         if not classroom:
             return jsonify({'error': 'Class not found or not owned by teacher'}), 404
+        class_id = classroom.id
 
     quiz = Quiz(
         teacher_id=teacher_id,
+        class_id=class_id,
         title=title,
         timer_seconds=timer_seconds,
         start_date=start_date,
@@ -343,40 +373,179 @@ def create_quiz():
 
     db.session.commit()
 
-    # Serialize persisted questions for response
-    questions_response = [
-        {
-            'id': q.id,
-            'type': q.type,
-            'text': q.text,
-            'options': q.options,
-            'correct_answer': q.correct_answer,
-            'points': q.points,
-            'order': q.order,
-        }
-        for q in quiz.questions
-    ]
-
-    # Store questions as JSON in the quiz data (if using a JSON field) or in a separate table
-    # For now, we'll just acknowledge the questions were received
-    quiz_data = {
-        'id': quiz.id,
-        'public_id': quiz.public_id,
-        'teacher_id': quiz.teacher_id,
-        'title': quiz.title,
-        'timer_seconds': quiz.timer_seconds,
-        'start_date': quiz.start_date.isoformat() if quiz.start_date else None,
-        'class_id': class_id,
-        'questions_count': len(quiz.questions),
-        'questions': questions_response,
-    }
-
     return jsonify(
         {
             'message': 'Quiz created successfully with questions',
-            'quiz': quiz_data,
+            'quiz': _serialize_quiz(quiz),
         }
     ), 201
+
+
+@teacher_bp.route('/teacher/quizzes', methods=['GET'])
+@token_required
+def list_teacher_quizzes():
+    guard = _teacher_guard()
+    if guard:
+        return guard
+
+    teacher_id = int(request.current_user_id)
+    quizzes = (
+        Quiz.query.filter_by(teacher_id=teacher_id)
+        .order_by(Quiz.start_date.desc(), Quiz.id.desc())
+        .all()
+    )
+
+    return jsonify({'quizzes': [_serialize_quiz(quiz) for quiz in quizzes]}), 200
+
+
+@teacher_bp.route('/teacher/quiz/results', methods=['GET'])
+@token_required
+def list_teacher_quiz_results():
+    guard = _teacher_guard()
+    if guard:
+        return guard
+
+    teacher_id = int(request.current_user_id)
+    class_id = request.args.get('class_id', type=int)
+
+    teacher_classes = Class.query.filter_by(teacher_id=teacher_id).all()
+    teacher_class_ids = [classroom.id for classroom in teacher_classes]
+    if not teacher_class_ids:
+        return jsonify({'results': []}), 200
+
+    if class_id is not None and class_id not in teacher_class_ids:
+        return jsonify({'error': 'Class not found or not owned by teacher'}), 404
+
+    active_class_ids = [class_id] if class_id is not None else teacher_class_ids
+
+    rows = (
+        db.session.query(QuizResult, Quiz, User)
+        .join(Quiz, Quiz.id == QuizResult.quiz_id)
+        .join(User, User.id == QuizResult.student_id)
+        .filter(Quiz.teacher_id == teacher_id, User.class_id.in_(active_class_ids))
+        .order_by(QuizResult.updated_at.desc(), QuizResult.id.desc())
+        .all()
+    )
+
+    parent_ids = sorted({student.parent_id for _, _, student in rows if student.parent_id is not None})
+    parent_map = {}
+    if parent_ids:
+        parent_rows = User.query.filter(User.id.in_(parent_ids), User.role == 'Parent').all()
+        parent_map = {parent.id: parent for parent in parent_rows}
+
+    class_map = {classroom.id: classroom for classroom in teacher_classes}
+    payload = []
+    for result, quiz, student in rows:
+        parent = parent_map.get(student.parent_id)
+        classroom = class_map.get(student.class_id)
+        submitted_at = result.updated_at or result.created_at
+        student_name = f"{(student.first_name or '').strip()} {(student.last_name or '').strip()}".strip() or student.username
+        parent_name = None
+        if parent:
+            parent_name = f"{(parent.first_name or '').strip()} {(parent.last_name or '').strip()}".strip() or parent.username
+
+        payload.append(
+            {
+                'id': result.id,
+                'public_id': result.public_id,
+                'quiz_id': quiz.id,
+                'quiz_public_id': quiz.public_id,
+                'quiz_title': quiz.title,
+                'quiz_class_id': quiz.class_id,
+                'quiz_start_date': quiz.start_date.isoformat() if quiz.start_date else None,
+                'student_id': student.id,
+                'student_public_id': student.public_id,
+                'student_name': student_name,
+                'student_username': student.username,
+                'class_id': student.class_id,
+                'class_name': classroom.name if classroom else None,
+                'parent_id': parent.id if parent else None,
+                'parent_public_id': parent.public_id if parent else None,
+                'parent_name': parent_name,
+                'score': result.score,
+                'submitted_at': submitted_at.isoformat() if submitted_at else None,
+                'questions_count': len(quiz.questions or []),
+            }
+        )
+
+    return jsonify({'results': payload}), 200
+
+
+@teacher_bp.route('/teacher/quiz/<int:quiz_id>', methods=['GET', 'PATCH'])
+@token_required
+def manage_teacher_quiz(quiz_id: int):
+    guard = _teacher_guard()
+    if guard:
+        return guard
+
+    teacher_id = int(request.current_user_id)
+    quiz = Quiz.query.filter_by(id=quiz_id, teacher_id=teacher_id).first()
+    if not quiz:
+        return jsonify({'error': 'Quiz not found or not owned by teacher'}), 404
+
+    if request.method == 'GET':
+        return jsonify({'quiz': _serialize_quiz(quiz)}), 200
+
+    data = request.get_json(silent=True) or {}
+    title = (data.get('title') or '').strip()
+    timer_seconds = data.get('timer_seconds', quiz.timer_seconds)
+    start_date_raw = data.get('start_date')
+    class_id = data.get('class_id', quiz.class_id)
+    questions = data.get('questions', [])
+
+    if not title:
+        return jsonify({'error': 'title is required'}), 400
+
+    try:
+        timer_seconds = int(timer_seconds)
+        if timer_seconds <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'timer_seconds must be a positive integer'}), 400
+
+    try:
+        if start_date_raw:
+            start_date = datetime.fromisoformat(str(start_date_raw).replace('Z', '+00:00'))
+        else:
+            start_date = quiz.start_date or datetime.utcnow()
+    except ValueError:
+        return jsonify({'error': 'start_date must be a valid ISO-8601 datetime'}), 400
+
+    if class_id:
+        classroom = Class.query.filter_by(id=class_id, teacher_id=teacher_id).first()
+        if not classroom:
+            return jsonify({'error': 'Class not found or not owned by teacher'}), 404
+        class_id = classroom.id
+
+    quiz.title = title
+    quiz.timer_seconds = timer_seconds
+    quiz.start_date = start_date
+    quiz.class_id = class_id
+
+    QuizQuestion.query.filter_by(quiz_id=quiz.id).delete()
+
+    for idx, q in enumerate(questions):
+        if not isinstance(q, dict):
+            continue
+        question_text = (q.get('text') or '').strip()
+        if not question_text:
+            continue
+        db.session.add(
+            QuizQuestion(
+                quiz_id=quiz.id,
+                type=str(q.get('type', 'multiple_choice')).strip(),
+                text=question_text,
+                options=q.get('options'),
+                correct_answer=str(q.get('correct_answer', '')).strip() or None,
+                points=int(q.get('points', 1)) if q.get('points') else 1,
+                order=idx,
+            )
+        )
+
+    db.session.commit()
+    db.session.refresh(quiz)
+
+    return jsonify({'message': 'Quiz updated successfully', 'quiz': _serialize_quiz(quiz)}), 200
 
 
 @teacher_bp.route('/teacher/message', methods=['POST'])
@@ -390,6 +559,7 @@ def send_message():
     # Accept both receiver_public_id and student_id (for parent communication)
     receiver_public_id = (data.get('receiver_public_id') or data.get('student_id') or '').strip()
     content = (data.get('content') or data.get('message') or '').strip()
+    quiz_result_id = data.get('quiz_result_id')
 
     if not receiver_public_id:
         return jsonify({'error': 'receiver_public_id or student_id is required'}), 400
@@ -439,7 +609,17 @@ def send_message():
         if not student_exists:
             return jsonify({'error': 'Parent is not linked to your students'}), 403
 
-    message = Message(sender_id=teacher_id, receiver_id=receiver.id, content=content)
+    # Validate quiz_result_id if provided
+    if quiz_result_id:
+        try:
+            quiz_result_id = int(quiz_result_id)
+            quiz_result = QuizResult.query.get(quiz_result_id)
+            if not quiz_result:
+                return jsonify({'error': 'Quiz result not found'}), 404
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid quiz_result_id'}), 400
+
+    message = Message(sender_id=teacher_id, receiver_id=receiver.id, content=content, quiz_result_id=quiz_result_id)
     db.session.add(message)
     db.session.commit()
 

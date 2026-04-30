@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from app.server.database import db
-from app.server.models.user import User, PlaytimeLog, MissionProgress
+from app.server.models.user import Class, Message, Quiz, QuizResult, User
 from app.auth.auth_handler import signJWT
 from app.auth.auth_bearer import token_required
 
@@ -56,6 +56,38 @@ def login():
 
     return jsonify({'error': 'Invalid credentials'}), 401
 
+@user_bp.route('/auth/change-password', methods=['POST'])
+@token_required
+def change_password():
+    data = request.json or {}
+    current_user_id = int(request.current_user_id)
+    user = User.query.get(current_user_id)
+
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    current_password = data.get('current_password')
+    new_password = data.get('new_password')
+
+    if not current_password or not new_password:
+        return jsonify({'error': 'current_password and new_password are required'}), 400
+
+    if not check_password_hash(user.password_hash, current_password):
+        return jsonify({'error': 'Incorrect current password'}), 403
+
+    user.password_hash = generate_password_hash(new_password)
+    db.session.commit()
+
+    return jsonify({'message': 'Password changed successfully'}), 200
+
+@user_bp.route('/user/profile', methods=['GET'])
+@token_required
+def get_own_profile():
+    current_user_id = int(request.current_user_id)
+    user = User.query.get(current_user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    return jsonify(user.to_dict()), 200
 
 @user_bp.route('/user/profile', methods=['PATCH'])
 @token_required
@@ -89,71 +121,160 @@ def update_own_profile():
     db.session.commit()
     return jsonify({'message': 'Profile updated successfully', 'user': user.to_dict()}), 200
 
-@user_bp.route('/parent/link_child', methods=['POST'])
+@user_bp.route('/ping', methods=['GET'])
+def ping():
+    return jsonify({"status": "ok"}), 200
+
+
+@user_bp.route('/student/quiz/<int:quiz_id>', methods=['GET'])
 @token_required
-def link_child():
-    if request.current_user_role != 'Parent':
-        return jsonify({'error': 'Unauthorized'}), 403
-    
-    data = request.json
-    child_username = data.get('child_username')
-    
-    child = User.query.filter_by(username=child_username).first()
-    if not child:
-        return jsonify({'error': 'Child user not found'}), 404
-        
-    # Link child to parent (current user)
-    child.parent_id = int(request.current_user_id)
-    db.session.commit()
-    
-    return jsonify({'message': f'Linked {child_username} to account'}), 200
+def student_get_quiz(quiz_id: int):
+    student_id = int(request.current_user_id)
+    student = User.query.get(student_id)
+    if not student or student.role != 'Student':
+        return jsonify({'error': 'Student not found'}), 404
 
+    quiz = Quiz.query.get(quiz_id)
+    if not quiz:
+        return jsonify({'error': 'Quiz not found'}), 404
 
-@user_bp.route('/parent/unlink_child', methods=['POST'])
-@token_required
-def unlink_child():
-    if request.current_user_role != 'Parent':
-        return jsonify({'error': 'Unauthorized'}), 403
+    if quiz.class_id != student.class_id:
+        return jsonify({'error': 'This quiz is not assigned to your class'}), 403
 
-    data = request.json or {}
-    child_username = (data.get('child_username') or '').strip()
-    if child_username == '':
-        return jsonify({'error': 'child_username is required'}), 400
+    existing = QuizResult.query.filter_by(quiz_id=quiz_id, student_id=student_id).first()
+    if existing:
+        return jsonify({'error': 'You have already submitted this quiz'}), 409
 
-    parent_id = int(request.current_user_id)
-    child = User.query.filter_by(username=child_username, parent_id=parent_id, role='Student').first()
-    if not child:
-        return jsonify({'error': 'Linked child not found'}), 404
-
-    child.parent_id = None
-    db.session.commit()
-
-    return jsonify({'message': f'Unlinked {child_username} successfully'}), 200
-
-@user_bp.route('/parent/stats', methods=['GET'])
-@token_required
-def get_children_stats():
-    if request.current_user_role != 'Parent':
-        return jsonify({'error': 'Unauthorized'}), 403
-        
-    parent_id = int(request.current_user_id)
-    children = User.query.filter_by(parent_id=parent_id).all()
-    
-    stats = []
-    for child in children:
-        # Get Playtime
-        logs = PlaytimeLog.query.filter_by(user_id=child.id).order_by(PlaytimeLog.date.desc()).limit(7).all()
-        playtime = [{"date": str(l.date), "minutes": l.duration_minutes} for l in logs]
-        
-        # Get Mission Progress (Grades/Scores)
-        progress = MissionProgress.query.filter_by(user_id=child.id).all()
-        scores = [{"mission_id": p.mission_id, "score": p.score, "status": p.status} for p in progress]
-        
-        stats.append({
-            "child": child.username,
-            "child_public_id": child.public_id,
-            "playtime_logs": playtime,
-            "scores": scores
+    ordered = sorted(quiz.questions or [], key=lambda q: (q.order or 0, q.id or 0))
+    questions = []
+    for q in ordered:
+        questions.append({
+            'id': q.id,
+            'type': q.type,
+            'text': q.text,
+            'options': q.options or [],
+            'points': q.points,
         })
-        
-    return jsonify(stats), 200
+
+    return jsonify({
+        'id': quiz.id,
+        'title': quiz.title,
+        'timer_seconds': quiz.timer_seconds,
+        'questions': questions,
+    }), 200
+
+
+@user_bp.route('/student/quiz/<int:quiz_id>/submit', methods=['POST'])
+@token_required
+def student_submit_quiz(quiz_id: int):
+    student_id = int(request.current_user_id)
+    student = User.query.get(student_id)
+    if not student or student.role != 'Student':
+        return jsonify({'error': 'Student not found'}), 404
+
+    quiz = Quiz.query.get(quiz_id)
+    if not quiz:
+        return jsonify({'error': 'Quiz not found'}), 404
+
+    if quiz.class_id != student.class_id:
+        return jsonify({'error': 'This quiz is not assigned to your class'}), 403
+
+    existing = QuizResult.query.filter_by(quiz_id=quiz_id, student_id=student_id).first()
+    if existing:
+        return jsonify({'error': 'Already submitted'}), 409
+
+    data = request.get_json(silent=True) or {}
+    answers: dict = data.get('answers', {})  # { str(question_id): answer_string }
+
+    ordered = sorted(quiz.questions or [], key=lambda q: (q.order or 0, q.id or 0))
+    score = 0
+    for q in ordered:
+        given = str(answers.get(str(q.id), '')).strip().lower()
+        correct = str(q.correct_answer or '').strip().lower()
+        if given and correct and given == correct:
+            score += int(q.points or 1)
+
+    result = QuizResult(quiz_id=quiz_id, student_id=student_id, score=score)
+    db.session.add(result)
+    db.session.commit()
+
+    return jsonify({
+        'score': score,
+        'total_points': sum(int(q.points or 1) for q in ordered),
+        'questions_count': len(ordered),
+        'result_id': result.id,
+    }), 201
+
+
+@user_bp.route('/student/class', methods=['GET'])
+@token_required
+def student_class_info():
+    student_id = int(request.current_user_id)
+    student = User.query.get(student_id)
+    if not student or student.role != 'Student':
+        return jsonify({'error': 'Student not found'}), 404
+
+    if not student.class_id:
+        return jsonify({'error': 'You are not assigned to a class yet'}), 404
+
+    classroom = Class.query.get(student.class_id)
+    if not classroom:
+        return jsonify({'error': 'Class not found'}), 404
+
+    teacher = User.query.get(classroom.teacher_id)
+    teacher_name = ''
+    if teacher:
+        full = f"{(teacher.first_name or '').strip()} {(teacher.last_name or '').strip()}".strip()
+        teacher_name = full if full else teacher.username
+
+    # All quizzes assigned to this class
+    all_quizzes = Quiz.query.filter_by(class_id=classroom.id).order_by(Quiz.start_date.asc()).all()
+
+    # Results this student already submitted
+    result_rows = QuizResult.query.filter_by(student_id=student_id).all()
+    result_by_quiz = {r.quiz_id: r for r in result_rows}
+
+    # Feedback messages keyed by quiz_result_id
+    result_ids = [r.id for r in result_rows]
+    feedback_by_result: dict = {}
+    if result_ids:
+        messages = (
+            Message.query
+            .filter(Message.receiver_id == student_id, Message.quiz_result_id.in_(result_ids))
+            .order_by(Message.created_at.desc())
+            .all()
+        )
+        for msg in messages:
+            # Keep only the most recent message per result (already ordered desc)
+            if msg.quiz_result_id not in feedback_by_result:
+                feedback_by_result[msg.quiz_result_id] = msg.content
+
+    pending = []
+    completed = []
+    for quiz in all_quizzes:
+        result = result_by_quiz.get(quiz.id)
+        questions_count = len(quiz.questions or [])
+        if result is None:
+            pending.append({
+                'id': quiz.id,
+                'public_id': quiz.public_id,
+                'title': quiz.title,
+                'due_date': quiz.start_date.strftime('%b %d, %Y') if quiz.start_date else '—',
+                'questions_count': questions_count,
+                'completed': False,
+            })
+        else:
+            completed.append({
+                'id': quiz.id,
+                'public_id': quiz.public_id,
+                'title': quiz.title,
+                'score': f"{result.score} / {questions_count}",
+                'feedback': feedback_by_result.get(result.id, ''),
+                'completed': True,
+            })
+
+    return jsonify({
+        'section': classroom.name,
+        'teacher_name': teacher_name,
+        'quizzes': pending + completed,
+    }), 200
