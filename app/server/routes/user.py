@@ -251,13 +251,20 @@ def student_submit_quiz(quiz_id):
         if is_correct:
             score += int(q.points or 1)
 
-    result = QuizResult(quiz_id=quiz_id_int, student_id=student_id, score=score)
+    total_points = sum(int(q.points or 1) for q in ordered)
+    if total_points == 0:
+        total_points = max(1, len(ordered))
+    
+    percentage = round((score / total_points) * 100.0, 1)
+
+    result = QuizResult(quiz_id=quiz_id_int, student_id=student_id, score=percentage)
     db.session.add(result)
     db.session.commit()
 
     return jsonify({
-        'score': score,
-        'total_points': sum(int(q.points or 1) for q in ordered),
+        'score': f"{percentage}%",
+        'raw_score': score,
+        'total_points': total_points,
         'questions_count': len(ordered),
         'result_id': result.id,
     }), 201
@@ -320,15 +327,11 @@ def student_class_info():
                 'completed': False,
             })
         else:
-            total_points = sum(q.points or 1 for q in (quiz.questions or []))
-            if total_points == 0:
-                total_points = len(quiz.questions or [])
-
             completed.append({
                 'id': quiz.id,
                 'public_id': quiz.public_id,
                 'title': quiz.title,
-                'score': f"{result.score} / {total_points}",
+                'score': f"{result.score}%",
                 'feedback': feedback_by_result.get(result.id, ''),
                 'completed': True,
             })

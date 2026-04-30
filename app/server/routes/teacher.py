@@ -480,7 +480,61 @@ def list_teacher_quiz_results():
     return jsonify({'results': payload}), 200
 
 
-@teacher_bp.route('/teacher/quiz/<int:quiz_id>', methods=['GET', 'PATCH'])
+@teacher_bp.route('/teacher/quiz/result/<int:result_id>', methods=['DELETE'])
+@token_required
+def delete_quiz_result(result_id: int):
+    """Allows a teacher to delete a student's quiz result, enabling a retake."""
+    guard = _teacher_guard()
+    if guard:
+        return guard
+
+    teacher_id = int(request.current_user_id)
+
+    result = QuizResult.query.get(result_id)
+    if not result:
+        return jsonify({'error': 'Quiz result not found'}), 404
+
+    # Verify the teacher owns the quiz associated with this result
+    quiz = Quiz.query.filter_by(id=result.quiz_id, teacher_id=teacher_id).first()
+    if not quiz:
+        return jsonify({'error': 'Quiz result does not belong to a quiz you own'}), 403
+
+    db.session.delete(result)
+    db.session.commit()
+
+    return jsonify({'message': 'Quiz result deleted successfully. The student can now retake the quiz.', 'result_id': result_id}), 200
+
+
+@teacher_bp.route('/teacher/quiz/<int:quiz_id>/retake', methods=['POST'])
+@token_required
+def allow_quiz_retake(quiz_id: int):
+    """Allows a student to retake a quiz by deleting their existing result for that specific quiz."""
+    guard = _teacher_guard()
+    if guard:
+        return guard
+
+    teacher_id = int(request.current_user_id)
+
+    data = request.get_json(silent=True) or {}
+    student_id = data.get('student_id')
+    if not student_id:
+        return jsonify({'error': 'student_id is required in the request body'}), 400
+
+    # Verify the teacher owns the quiz
+    quiz = Quiz.query.filter_by(id=quiz_id, teacher_id=teacher_id).first()
+    if not quiz:
+        return jsonify({'error': 'Quiz not found or not owned by you'}), 404
+
+    result = QuizResult.query.filter_by(quiz_id=quiz_id, student_id=student_id).first()
+    if not result:
+        return jsonify({'error': 'No existing quiz result found for this student to allow a retake'}), 404
+
+    db.session.delete(result)
+    db.session.commit()
+
+    return jsonify({'message': 'Quiz result deleted. The student can now retake the quiz.', 'quiz_id': quiz_id, 'student_id': student_id}), 200
+
+@teacher_bp.route('/teacher/quiz/<int:quiz_id>', methods=['GET', 'PATCH', 'DELETE'])
 @token_required
 def manage_teacher_quiz(quiz_id: int):
     guard = _teacher_guard()
@@ -494,6 +548,15 @@ def manage_teacher_quiz(quiz_id: int):
 
     if request.method == 'GET':
         return jsonify({'quiz': _serialize_quiz(quiz)}), 200
+
+    if request.method == 'DELETE':
+        # Manually delete associated results as there's no cascade from Quiz -> QuizResult
+        QuizResult.query.filter_by(quiz_id=quiz.id).delete()
+
+        # Questions are deleted via cascade='all, delete-orphan' on the Quiz.questions relationship
+        db.session.delete(quiz)
+        db.session.commit()
+        return jsonify({'message': 'Quiz and all its results deleted successfully', 'quiz_id': quiz_id}), 200
 
     data = request.get_json(silent=True) or {}
     title = (data.get('title') or '').strip()
