@@ -4,12 +4,15 @@ from app.server.database import init_db
 from app.server.routes.user import user_bp
 from app.server.routes.appRoutes import app_bp
 from app.server.routes.teacher import teacher_bp
+from app.server.routes.parent import parent_bp
 from app.server.routes.docs import docs_bp
 from app.server.routes.admin_users_flask import admin_users_bp
 import os
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
+
+LAN_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?"
 
 def create_app():
     app = Flask(__name__)
@@ -23,15 +26,7 @@ def create_app():
         app,
         resources={
             r"/*": {
-                "origins": [
-                    "http://localhost:5173",
-                    "http://127.0.0.1:5173",
-                    "http://localhost:3000",
-                    "http://127.0.0.1:3000",
-                    "http://192.168.1.7:5173",
-                    "http://192.168.1.7:3000",
-                ],
-                "origin_regex": r"http://192\.168\.\d+\.\d+:\d+",
+                "origins": LAN_ORIGIN_REGEX,
             }
         },
         supports_credentials=True,
@@ -46,6 +41,7 @@ def create_app():
     app.register_blueprint(user_bp)
     app.register_blueprint(app_bp)
     app.register_blueprint(teacher_bp)
+    app.register_blueprint(parent_bp)
     app.register_blueprint(docs_bp)
     app.register_blueprint(admin_users_bp)
     

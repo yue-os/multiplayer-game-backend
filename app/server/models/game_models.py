@@ -48,3 +48,5 @@ class GameState(BaseModel):
     current_event: LocationEvent
     players: list[PlayerState] = Field(default_factory=list)
     lockdown_meter: int = Field(ge=0)
+    current_round: int = 0
+    max_rounds: int = 10

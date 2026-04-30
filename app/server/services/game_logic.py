@@ -98,6 +98,32 @@ class GameEngine:
         elif target.health_status == HealthStatus.EXPOSED:
             target.health_status = HealthStatus.INFECTED
 
+    def compute_scores(self) -> list[dict[str, object]]:
+        """Return players ranked by score, highest first.
+
+        Scoring rules:
+          +500  mission completed
+          +10   per item in inventory (rewards active traders)
+          -200  if infected (health penalty)
+        """
+        results: list[dict[str, object]] = []
+        for player in self.game_state.players:
+            score = 0
+            if player.mission_completed:
+                score += 500
+            score += sum(player.inventory.values()) * 10
+            if player.health_status == HealthStatus.INFECTED:
+                score -= 200
+            results.append({
+                "player_id": player.player_id,
+                "display_name": player.player_id,
+                "score": score,
+                "mission_completed": player.mission_completed,
+                "health_status": player.health_status.value,
+            })
+        results.sort(key=lambda p: p["score"], reverse=True)
+        return results
+
     def rotate_event(self) -> str:
         available_events = list(LocationEvent)
         if len(available_events) <= 1:

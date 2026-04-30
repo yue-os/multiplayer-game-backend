@@ -11,8 +11,8 @@ class User(db.Model, TimestampMixin, PublicIdMixin):
     id = db.Column(db.Integer, primary_key=True)
     first_name = db.Column(db.String(80), nullable=False, default='')
     last_name = db.Column(db.String(80), nullable=False, default='')
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=False)
+    username = db.Column(db.String(80), unique=True, nullable=False, index=True)
+    email = db.Column(db.String(120), unique=True, nullable=False, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
     must_change_password = db.Column(db.Boolean, nullable=False, default=False)
     role = db.Column(db.String(20), nullable=False) # Admin, Teacher, Parent, Student
@@ -77,6 +77,7 @@ class Quiz(db.Model, TimestampMixin, PublicIdMixin):
     
     id = db.Column(db.Integer, primary_key=True)
     teacher_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    class_id = db.Column(db.Integer, db.ForeignKey('classes.id'), nullable=True)
     title = db.Column(db.String(100), nullable=False)
     timer_seconds = db.Column(db.Integer, default=300)
     start_date = db.Column(db.DateTime, default=datetime.utcnow)
@@ -109,9 +110,11 @@ class Message(db.Model, TimestampMixin, PublicIdMixin):
     sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     receiver_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     content = db.Column(db.Text, nullable=False)
+    quiz_result_id = db.Column(db.Integer, db.ForeignKey('quiz_results.id'), nullable=True)
 
     sender = db.relationship('User', foreign_keys=[sender_id], backref='sent_messages')
     receiver = db.relationship('User', foreign_keys=[receiver_id], backref='received_messages')
+    quiz_result = db.relationship('QuizResult', backref='feedback_messages')
 
 class GameServer(db.Model, PublicIdMixin):
     __tablename__ = 'game_servers'
