@@ -17,6 +17,7 @@ from app.server.models.user import (
     QuizResult,
     User,
 )
+from app.server.models.announcement import Announcement
 
 teacher_bp = Blueprint('teacher', __name__)
 
@@ -731,8 +732,45 @@ def create_announcement():
     if not classroom:
         return jsonify({'error': 'Class not found or not owned by teacher'}), 403
 
-    # Simple acknowledgement endpoint; frontend simulates displaying announcement locally.
-    return jsonify({'message': 'Announcement posted successfully', 'announcement': {'class_id': class_id, 'title': title, 'message': message}}), 201
+    announcement = Announcement(class_id=class_id, teacher_id=teacher_id, title=title, message=message)
+    db.session.add(announcement)
+    db.session.commit()
+
+    return jsonify({'message': 'Announcement posted successfully', 'announcement': announcement.to_dict()}), 201
+
+
+@teacher_bp.route('/teacher/announcements', methods=['GET'])
+@token_required
+def list_announcements():
+    guard = _teacher_guard()
+    if guard:
+        return guard
+
+    teacher_id = int(request.current_user_id)
+    
+    # Fetch all announcements for the teacher's classes
+    announcements = Announcement.query.filter_by(teacher_id=teacher_id).order_by(Announcement.created_at.desc()).all()
+
+    return jsonify({'announcements': [a.to_dict() for a in announcements]}), 200
+
+
+@teacher_bp.route('/teacher/announcement/<int:announcement_id>', methods=['DELETE'])
+@token_required
+def delete_announcement(announcement_id: int):
+    guard = _teacher_guard()
+    if guard:
+        return guard
+
+    teacher_id = int(request.current_user_id)
+    
+    announcement = Announcement.query.filter_by(id=announcement_id, teacher_id=teacher_id).first()
+    if not announcement:
+        return jsonify({'error': 'Announcement not found or not owned by teacher'}), 404
+
+    db.session.delete(announcement)
+    db.session.commit()
+
+    return jsonify({'message': 'Announcement deleted successfully', 'id': announcement_id}), 200
 
 
 @teacher_bp.route('/teacher/lobby/create', methods=['POST'])
