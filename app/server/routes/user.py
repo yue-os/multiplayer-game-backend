@@ -139,22 +139,27 @@ def ping():
     return jsonify({"status": "ok"}), 200
 
 
-@user_bp.route('/student/quiz/<int:quiz_id>', methods=['GET'])
+@user_bp.route('/student/quiz/<quiz_id>', methods=['GET'])
 @token_required
-def student_get_quiz(quiz_id: int):
+def student_get_quiz(quiz_id):
     student_id = int(request.current_user_id)
     student = User.query.get(student_id)
     if not student or student.role != 'Student':
         return jsonify({'error': 'Student not found'}), 404
 
-    quiz = Quiz.query.get(quiz_id)
+    try:
+        quiz_id_int = int(float(quiz_id))
+    except ValueError:
+        return jsonify({'error': f'Invalid quiz ID format: {quiz_id}'}), 400
+
+    quiz = Quiz.query.get(quiz_id_int)
     if not quiz:
         return jsonify({'error': 'Quiz not found'}), 404
 
     if quiz.class_id != student.class_id:
         return jsonify({'error': 'This quiz is not assigned to your class'}), 403
 
-    existing = QuizResult.query.filter_by(quiz_id=quiz_id, student_id=student_id).first()
+    existing = QuizResult.query.filter_by(quiz_id=quiz_id_int, student_id=student_id).first()
     if existing:
         return jsonify({'error': 'You have already submitted this quiz'}), 409
 
@@ -177,37 +182,76 @@ def student_get_quiz(quiz_id: int):
     }), 200
 
 
-@user_bp.route('/student/quiz/<int:quiz_id>/submit', methods=['POST'])
+@user_bp.route('/student/quiz/<quiz_id>/submit', methods=['POST'])
 @token_required
-def student_submit_quiz(quiz_id: int):
+def student_submit_quiz(quiz_id):
     student_id = int(request.current_user_id)
     student = User.query.get(student_id)
     if not student or student.role != 'Student':
         return jsonify({'error': 'Student not found'}), 404
 
-    quiz = Quiz.query.get(quiz_id)
+    try:
+        quiz_id_int = int(float(quiz_id))
+    except ValueError:
+        return jsonify({'error': f'Invalid quiz ID format: {quiz_id}'}), 400
+
+    quiz = Quiz.query.get(quiz_id_int)
     if not quiz:
         return jsonify({'error': 'Quiz not found'}), 404
 
     if quiz.class_id != student.class_id:
         return jsonify({'error': 'This quiz is not assigned to your class'}), 403
 
-    existing = QuizResult.query.filter_by(quiz_id=quiz_id, student_id=student_id).first()
+    existing = QuizResult.query.filter_by(quiz_id=quiz_id_int, student_id=student_id).first()
     if existing:
         return jsonify({'error': 'Already submitted'}), 409
 
     data = request.get_json(silent=True) or {}
     answers: dict = data.get('answers', {})  # { str(question_id): answer_string }
 
+    clean_answers = {}
+    for k, v in answers.items():
+        k_str = str(k)
+        if k_str.endswith('.0'):
+            k_str = k_str[:-2]
+        clean_answers[k_str] = v
+
     ordered = sorted(quiz.questions or [], key=lambda q: (q.order or 0, q.id or 0))
     score = 0
     for q in ordered:
-        given = str(answers.get(str(q.id), '')).strip().lower()
-        correct = str(q.correct_answer or '').strip().lower()
-        if given and correct and given == correct:
+        given_answer = str(clean_answers.get(str(q.id), '')).strip()
+        correct_answer = str(q.correct_answer or '').strip()
+
+        if not given_answer or not correct_answer:
+            continue
+
+        is_correct = False
+        if q.type == 'multiple_choice':
+            # For multiple choice, it's a direct index comparison
+            is_correct = (given_answer == correct_answer)
+        else:  # For 'short_answer', 'identification', etc.
+            given_lower = given_answer.lower()
+            correct_lower = correct_answer.lower()
+
+            # 1. Direct case-insensitive comparison
+            if given_lower == correct_lower:
+                is_correct = True
+            # 2. Comparison ignoring all whitespace (e.g., "y=2x-3" vs "y = 2x - 3")
+            elif given_lower.replace(" ", "") == correct_lower.replace(" ", ""):
+                is_correct = True
+            # 3. Keyword-based check for descriptive answers (e.g., "prokaryotic and eukaryotic")
+            else:
+                import re
+                ignore_words = {'and', 'or', 'the', 'a', 'an', 'is', 'are', 'of', 'in', 'to', 'for'}
+                correct_words = set(re.sub(r'[^\w\s]', '', correct_lower).split()) - ignore_words
+                given_words = set(re.sub(r'[^\w\s]', '', given_lower).split()) - ignore_words
+                if correct_words and correct_words.issubset(given_words):
+                    is_correct = True
+
+        if is_correct:
             score += int(q.points or 1)
 
-    result = QuizResult(quiz_id=quiz_id, student_id=student_id, score=score)
+    result = QuizResult(quiz_id=quiz_id_int, student_id=student_id, score=score)
     db.session.add(result)
     db.session.commit()
 
@@ -266,22 +310,25 @@ def student_class_info():
     completed = []
     for quiz in all_quizzes:
         result = result_by_quiz.get(quiz.id)
-        questions_count = len(quiz.questions or [])
         if result is None:
             pending.append({
                 'id': quiz.id,
                 'public_id': quiz.public_id,
                 'title': quiz.title,
                 'due_date': quiz.start_date.strftime('%b %d, %Y') if quiz.start_date else '—',
-                'questions_count': questions_count,
+                'questions_count': len(quiz.questions or []),
                 'completed': False,
             })
         else:
+            total_points = sum(q.points or 1 for q in (quiz.questions or []))
+            if total_points == 0:
+                total_points = len(quiz.questions or [])
+
             completed.append({
                 'id': quiz.id,
                 'public_id': quiz.public_id,
                 'title': quiz.title,
-                'score': f"{result.score} / {questions_count}",
+                'score': f"{result.score} / {total_points}",
                 'feedback': feedback_by_result.get(result.id, ''),
                 'completed': True,
             })
