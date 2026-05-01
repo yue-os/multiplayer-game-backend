@@ -333,6 +333,15 @@ def student_class_info():
 
     # All quizzes assigned to this class
     all_quizzes = Quiz.query.filter_by(class_id=classroom.id).order_by(Quiz.start_date.asc()).all()
+    
+    # All announcements for this class
+    all_announcements = Announcement.query.filter_by(class_id=classroom.id).order_by(Announcement.created_at.desc()).all()
+    announcement_payload = [{
+        'id': a.id,
+        'title': a.title,
+        'message': a.message,
+        'created_at': a.created_at.isoformat() if a.created_at else None
+    } for a in all_announcements]
 
     # Results this student already submitted
     result_rows = QuizResult.query.filter_by(student_id=student_id).all()
@@ -380,4 +389,5 @@ def student_class_info():
         'section': classroom.name,
         'teacher_name': teacher_name,
         'quizzes': pending + completed,
+        'announcements': announcement_payload,
     }), 200
