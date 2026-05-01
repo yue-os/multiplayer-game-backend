@@ -2,10 +2,14 @@ from flask import Blueprint, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from app.server.database import db
 from app.server.models.user import Class, Message, Quiz, QuizResult, User
+from app.server.models.announcement import Announcement
 from app.auth.auth_handler import signJWT
 from app.auth.auth_bearer import token_required
 
 user_bp = Blueprint('user', __name__)
+
+# In-memory storage for seen notifications to avoid showing them repeatedly
+SEEN_NOTIFICATIONS = {}
 
 @user_bp.route('/auth/register', methods=['POST'])
 def register():
@@ -138,6 +142,42 @@ def update_own_profile():
 def ping():
     return jsonify({"status": "ok"}), 200
 
+
+@user_bp.route('/student/notifications', methods=['GET'])
+@token_required
+def get_student_notifications():
+    student_id = int(request.current_user_id)
+    student = User.query.get(student_id)
+    if not student or student.role != 'Student' or not student.class_id:
+        return jsonify({'notifications': []}), 200
+
+    if student_id not in SEEN_NOTIFICATIONS:
+        SEEN_NOTIFICATIONS[student_id] = {'announcements': set(), 'quizzes': set()}
+    
+    seen = SEEN_NOTIFICATIONS[student_id]
+    notifications = []
+
+    latest_announcement = Announcement.query.filter_by(class_id=student.class_id).order_by(Announcement.created_at.desc()).first()
+    if latest_announcement and latest_announcement.id not in seen['announcements']:
+        notifications.append({
+            'id': latest_announcement.id,
+            'type': 'announcement',
+            'title': f"Announcement: {latest_announcement.title}",
+            'message': latest_announcement.message,
+        })
+        seen['announcements'].add(latest_announcement.id)
+
+    latest_quiz = Quiz.query.filter_by(class_id=student.class_id).order_by(Quiz.id.desc()).first()
+    if latest_quiz and latest_quiz.id not in seen['quizzes']:
+        notifications.append({
+            'id': latest_quiz.id,
+            'type': 'quiz',
+            'title': "New Quiz Published",
+            'message': f"{latest_quiz.title} is now available!",
+        })
+        seen['quizzes'].add(latest_quiz.id)
+
+    return jsonify({'notifications': notifications}), 200
 
 @user_bp.route('/student/quiz/<quiz_id>', methods=['GET'])
 @token_required
