@@ -149,6 +149,22 @@ def _ensure_messages_columns(app, inspector):
         db.session.execute(text("ALTER TABLE messages ADD COLUMN quiz_result_id INTEGER"))
         modified = True
 
+    if 'student_name' not in columns:
+        db.session.execute(text("ALTER TABLE messages ADD COLUMN student_name VARCHAR(255)"))
+        modified = True
+
+    if 'class_name' not in columns:
+        db.session.execute(text("ALTER TABLE messages ADD COLUMN class_name VARCHAR(255)"))
+        modified = True
+
+    if 'sender_name' not in columns:
+        db.session.execute(text("ALTER TABLE messages ADD COLUMN sender_name VARCHAR(255)"))
+        modified = True
+
+    if 'sender_role' not in columns:
+        db.session.execute(text("ALTER TABLE messages ADD COLUMN sender_role VARCHAR(50)"))
+        modified = True
+
     if modified:
         db.session.commit()
 

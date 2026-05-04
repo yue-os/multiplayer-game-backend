@@ -109,6 +109,10 @@ class Message(db.Model, TimestampMixin, PublicIdMixin):
     id = db.Column(db.Integer, primary_key=True)
     sender_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     receiver_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    student_name = db.Column(db.String(255), nullable=True)
+    class_name = db.Column(db.String(255), nullable=True)
+    sender_name = db.Column(db.String(255), nullable=True)
+    sender_role = db.Column(db.String(50), nullable=True)
     content = db.Column(db.Text, nullable=False)
     quiz_result_id = db.Column(db.Integer, db.ForeignKey('quiz_results.id'), nullable=True)
 

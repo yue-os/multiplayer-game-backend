@@ -7,6 +7,54 @@ from app.server.models.user import Class, User, Message, QuizResult, Quiz, Missi
 parent_bp = Blueprint('parent', __name__)
 
 
+def _user_display_name(user):
+    return f"{(user.first_name or '').strip()} {(user.last_name or '').strip()}".strip() or user.username
+
+
+def _parse_legacy_student_message(content):
+    lines = str(content or '').splitlines()
+    parsed = {'student_name': None, 'class_name': None, 'sender_name': None, 'content': str(content or '').strip()}
+
+    for line in lines:
+        if line.startswith('Student:'):
+            parsed['student_name'] = line.replace('Student:', '', 1).strip()
+        elif line.startswith('Class:'):
+            parsed['class_name'] = line.replace('Class:', '', 1).strip()
+        elif line.startswith('From:'):
+            parsed['sender_name'] = line.replace('From:', '', 1).strip()
+
+    try:
+        blank_index = lines.index('')
+    except ValueError:
+        blank_index = -1
+
+    if parsed['student_name'] and parsed['class_name'] and blank_index >= 0:
+        parsed['content'] = '\n'.join(lines[blank_index + 1:]).strip()
+
+    return parsed
+
+
+def _serialize_message(message):
+    legacy = _parse_legacy_student_message(message.content)
+    return {
+        'id': message.id,
+        'public_id': message.public_id,
+        'sender_id': message.sender_id,
+        'sender_public_id': message.sender.public_id,
+        'sender_name': message.sender_name or legacy['sender_name'] or _user_display_name(message.sender),
+        'sender_role': message.sender_role or message.sender.role,
+        'receiver_id': message.receiver_id,
+        'receiver_public_id': message.receiver.public_id,
+        'receiver_name': _user_display_name(message.receiver),
+        'receiver_role': message.receiver.role,
+        'student_name': message.student_name or legacy['student_name'],
+        'class_name': message.class_name or legacy['class_name'],
+        'content': message.content if message.student_name and message.class_name else legacy['content'],
+        'created_at': message.created_at.isoformat() if message.created_at else None,
+        'quiz_info': None,
+    }
+
+
 def _parent_guard():
     """Check if current user is a Parent"""
     user_id = int(request.current_user_id)
@@ -37,6 +85,7 @@ def get_parent_feedback():
     # Get all messages sent to parent or to parent's children
     messages_query = Message.query.filter(
         db.or_(
+            Message.sender_id == parent_id,
             Message.receiver_id == parent_id,
             Message.receiver_id.in_(child_ids) if child_ids else False
         )
@@ -46,19 +95,7 @@ def get_parent_feedback():
     
     feedback_data = []
     for msg in messages:
-        message_dict = {
-            'id': msg.id,
-            'public_id': msg.public_id,
-            'sender_id': msg.sender_id,
-            'sender_public_id': msg.sender.public_id,
-            'sender_name': f"{msg.sender.first_name} {msg.sender.last_name}".strip() or msg.sender.username,
-            'receiver_id': msg.receiver_id,
-            'receiver_public_id': msg.receiver.public_id,
-            'receiver_name': f"{msg.receiver.first_name} {msg.receiver.last_name}".strip() or msg.receiver.username,
-            'content': msg.content,
-            'created_at': msg.created_at.isoformat() if msg.created_at else None,
-            'quiz_info': None
-        }
+        message_dict = _serialize_message(msg)
         
         # If message is linked to a quiz result, include quiz details
         if msg.quiz_result_id:
@@ -70,6 +107,7 @@ def get_parent_feedback():
                     'quiz_result_id': quiz_result.id,
                     'quiz_title': quiz.title if quiz else None,
                     'student_name': f"{student.first_name} {student.last_name}".strip() or student.username if student else None,
+                    'class_name': Class.query.get(student.class_id).name if student and student.class_id else None,
                     'score': quiz_result.score,
                     'submitted_at': quiz_result.created_at.isoformat() if quiz_result.created_at else None
                 }
@@ -105,6 +143,8 @@ def send_parent_message():
     data = request.get_json(silent=True) or {}
     receiver_public_id = str(data.get('receiver_public_id') or '').strip()
     content = str(data.get('content') or data.get('message') or '').strip()
+    student_name = str(data.get('student_name') or '').strip()
+    class_name = str(data.get('class_name') or '').strip()
 
     if not receiver_public_id:
         return jsonify({'error': 'receiver_public_id is required'}), 400
@@ -112,16 +152,27 @@ def send_parent_message():
     if not content:
         return jsonify({'error': 'content is required'}), 400
 
+    if not student_name or not class_name:
+        return jsonify({'error': 'student_name and class_name are required'}), 400
+
     receiver = User.query.filter_by(public_id=receiver_public_id, role='Teacher').first()
     if not receiver:
         return jsonify({'error': 'Teacher not found'}), 404
 
     parent_children = User.query.filter_by(parent_id=parent_id, role='Student').all()
-    child_class_ids = {child.class_id for child in parent_children if child.class_id is not None}
-    if child_class_ids:
+    matching_children = []
+    for child in parent_children:
+        child_class = Class.query.get(child.class_id) if child.class_id else None
+        if _user_display_name(child).lower() == student_name.lower() and child_class and child_class.name == class_name:
+            matching_children.append(child)
+
+    if len(matching_children) != 1:
+        return jsonify({'error': 'Message must reference exactly one linked child and class.'}), 400
+    selected_child_class_ids = {child.class_id for child in matching_children if child.class_id is not None}
+    if selected_child_class_ids:
         teacher_has_child_class = Quiz.query.filter(
             Quiz.teacher_id == receiver.id,
-            Quiz.class_id.in_(child_class_ids),
+            Quiz.class_id.in_(selected_child_class_ids),
         ).first()
     else:
         teacher_has_child_class = None
@@ -129,26 +180,29 @@ def send_parent_message():
     if not teacher_has_child_class:
         teacher_has_child_class = Class.query.filter(
             Class.teacher_id == receiver.id,
-            Class.id.in_(child_class_ids),
-        ).first() if child_class_ids else None
+            Class.id.in_(selected_child_class_ids),
+        ).first() if selected_child_class_ids else None
 
     if parent_children and not teacher_has_child_class:
         return jsonify({'error': 'You can only message teachers connected to your linked children.'}), 403
 
-    message = Message(sender_id=parent_id, receiver_id=receiver.id, content=content)
+    parent = User.query.get(parent_id)
+    message = Message(
+        sender_id=parent_id,
+        receiver_id=receiver.id,
+        student_name=student_name,
+        class_name=class_name,
+        sender_name=_user_display_name(parent),
+        sender_role=parent.role,
+        content=content,
+    )
     db.session.add(message)
     db.session.commit()
 
     return jsonify({
         'message': 'Message sent successfully',
         'data': {
-            'id': message.id,
-            'public_id': message.public_id,
-            'sender_id': message.sender_id,
-            'receiver_id': message.receiver_id,
-            'receiver_public_id': receiver.public_id,
-            'content': message.content,
-            'created_at': message.created_at.isoformat() if message.created_at else None,
+            **_serialize_message(message),
         },
     }), 201
 
@@ -175,19 +229,7 @@ def get_feedback_detail(message_id):
     if message.receiver_id != parent_id and message.receiver_id not in child_ids:
         return jsonify({'error': 'Unauthorized: message not for you or your children'}), 403
     
-    message_dict = {
-        'id': message.id,
-        'public_id': message.public_id,
-        'sender_id': message.sender_id,
-        'sender_public_id': message.sender.public_id,
-        'sender_name': f"{message.sender.first_name} {message.sender.last_name}".strip() or message.sender.username,
-        'receiver_id': message.receiver_id,
-        'receiver_public_id': message.receiver.public_id,
-        'receiver_name': f"{message.receiver.first_name} {message.receiver.last_name}".strip() or message.receiver.username,
-        'content': message.content,
-        'created_at': message.created_at.isoformat() if message.created_at else None,
-        'quiz_info': None
-    }
+    message_dict = _serialize_message(message)
     
     # Include quiz details if available
     if message.quiz_result_id:
@@ -199,6 +241,7 @@ def get_feedback_detail(message_id):
                 'quiz_result_id': quiz_result.id,
                 'quiz_title': quiz.title if quiz else None,
                 'student_name': f"{student.first_name} {student.last_name}".strip() or student.username if student else None,
+                'class_name': Class.query.get(student.class_id).name if student and student.class_id else None,
                 'score': quiz_result.score,
                 'submitted_at': quiz_result.created_at.isoformat() if quiz_result.created_at else None
             }

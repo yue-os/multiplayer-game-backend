@@ -24,6 +24,53 @@ from app.server.models.announcement import Announcement
 teacher_bp = Blueprint('teacher', __name__)
 
 
+def _user_display_name(user):
+    return f"{(user.first_name or '').strip()} {(user.last_name or '').strip()}".strip() or user.username
+
+
+def _parse_legacy_student_message(content):
+    lines = str(content or '').splitlines()
+    parsed = {'student_name': None, 'class_name': None, 'sender_name': None, 'content': str(content or '').strip()}
+
+    for line in lines:
+        if line.startswith('Student:'):
+            parsed['student_name'] = line.replace('Student:', '', 1).strip()
+        elif line.startswith('Class:'):
+            parsed['class_name'] = line.replace('Class:', '', 1).strip()
+        elif line.startswith('From:'):
+            parsed['sender_name'] = line.replace('From:', '', 1).strip()
+
+    try:
+        blank_index = lines.index('')
+    except ValueError:
+        blank_index = -1
+
+    if parsed['student_name'] and parsed['class_name'] and blank_index >= 0:
+        parsed['content'] = '\n'.join(lines[blank_index + 1:]).strip()
+
+    return parsed
+
+
+def _serialize_message(message):
+    legacy = _parse_legacy_student_message(message.content)
+    return {
+        'id': message.id,
+        'public_id': message.public_id,
+        'sender_id': message.sender_id,
+        'sender_public_id': message.sender.public_id,
+        'sender_name': message.sender_name or legacy['sender_name'] or _user_display_name(message.sender),
+        'sender_role': message.sender_role or message.sender.role,
+        'receiver_id': message.receiver_id,
+        'receiver_public_id': message.receiver.public_id,
+        'receiver_name': _user_display_name(message.receiver),
+        'receiver_role': message.receiver.role,
+        'student_name': message.student_name or legacy['student_name'],
+        'class_name': message.class_name or legacy['class_name'],
+        'content': message.content if message.student_name and message.class_name else legacy['content'],
+        'created_at': message.created_at.isoformat() if message.created_at else None,
+    }
+
+
 def _serialize_quiz_question(question: QuizQuestion):
     return {
         'id': question.id,
@@ -694,6 +741,8 @@ def send_message():
     # Accept both receiver_public_id and student_id (for parent communication)
     receiver_public_id = (data.get('receiver_public_id') or data.get('student_id') or '').strip()
     content = (data.get('content') or data.get('message') or '').strip()
+    student_name = str(data.get('student_name') or '').strip()
+    class_name = str(data.get('class_name') or '').strip()
     quiz_result_id = data.get('quiz_result_id')
 
     if not receiver_public_id:
@@ -720,6 +769,9 @@ def send_message():
     if receiver.role not in ('Student', 'Parent'):
         return jsonify({'error': 'Receiver must be a Student or Parent'}), 400
 
+    if receiver.role == 'Parent' and (not student_name or not class_name):
+        return jsonify({'error': 'student_name and class_name are required for parent messages'}), 400
+
     if receiver.role == 'Student':
         valid_student = (
             db.session.query(User.id)
@@ -744,6 +796,21 @@ def send_message():
         if not student_exists:
             return jsonify({'error': 'Parent is not linked to your students'}), 403
 
+        matching_student = (
+            db.session.query(User)
+            .join(Class, Class.id == User.class_id)
+            .filter(
+                User.parent_id == receiver.id,
+                User.role == 'Student',
+                User.class_id.in_(teacher_class_ids),
+                Class.name == class_name,
+            )
+            .all()
+        )
+        matching_student_context = [student for student in matching_student if _user_display_name(student).lower() == student_name.lower()]
+        if len(matching_student_context) != 1:
+            return jsonify({'error': 'Message must reference one student in this parent-teacher class context.'}), 400
+
     # Validate quiz_result_id if provided
     if quiz_result_id:
         try:
@@ -754,7 +821,17 @@ def send_message():
         except (ValueError, TypeError):
             return jsonify({'error': 'Invalid quiz_result_id'}), 400
 
-    message = Message(sender_id=teacher_id, receiver_id=receiver.id, content=content, quiz_result_id=quiz_result_id)
+    sender = User.query.get(teacher_id)
+    message = Message(
+        sender_id=teacher_id,
+        receiver_id=receiver.id,
+        student_name=student_name or None,
+        class_name=class_name or None,
+        sender_name=_user_display_name(sender),
+        sender_role=sender.role,
+        content=content,
+        quiz_result_id=quiz_result_id,
+    )
     db.session.add(message)
     db.session.commit()
 
@@ -762,16 +839,30 @@ def send_message():
         {
             'message': 'Message sent successfully',
             'data': {
-                'id': message.id,
-                'public_id': message.public_id,
-                'sender_id': message.sender_id,
-                'receiver_id': message.receiver_id,
-                'receiver_public_id': receiver.public_id,
-                'content': message.content,
-                'created_at': message.created_at.isoformat() if message.created_at else None,
+                **_serialize_message(message),
             },
         }
     ), 201
+
+
+@teacher_bp.route('/teacher/messages', methods=['GET'])
+@token_required
+def list_teacher_messages():
+    guard = _teacher_guard()
+    if guard:
+        return guard
+
+    teacher_id = int(request.current_user_id)
+    messages = (
+        Message.query
+        .filter((Message.sender_id == teacher_id) | (Message.receiver_id == teacher_id))
+        .order_by(Message.created_at.desc())
+        .all()
+    )
+
+    payload = [_serialize_message(message) for message in messages]
+
+    return jsonify(payload), 200
 
 
 @teacher_bp.route('/teacher/announcement', methods=['POST'])
