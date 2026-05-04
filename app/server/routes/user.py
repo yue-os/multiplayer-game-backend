@@ -219,6 +219,72 @@ def student_get_quiz(quiz_id):
             'points': q.points,
         })
 
+
+@user_bp.route('/user/game-history', methods=['GET'])
+@token_required
+def get_game_history():
+    """Return a compact game history for the current user."""
+    current_user_id = int(request.current_user_id)
+    user = User.query.get(current_user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    # Playtime logs
+    playtime_q = PlaytimeLog.query.filter_by(user_id=current_user_id).order_by(PlaytimeLog.date.desc()).limit(20).all()
+    playtime_logs = []
+    for p in playtime_q:
+        playtime_logs.append({
+            'date': p.date.isoformat(),
+            'duration_minutes': p.duration_minutes,
+        })
+
+    # Mission progress
+    missions_q = MissionProgress.query.filter_by(user_id=current_user_id).order_by(MissionProgress.created_at.desc()).limit(20).all()
+    missions = []
+    for m in missions_q:
+        # attempt to resolve mission title
+        mission_title = ''
+        try:
+            mission_obj = Mission.query.get(m.mission_id)
+            mission_title = mission_obj.title if mission_obj else ''
+        except Exception:
+            mission_title = ''
+        missions.append({
+            'mission_id': m.mission_id,
+            'title': mission_title,
+            'status': m.status,
+            'score': m.score,
+            'updated_at': m.updated_at.isoformat() if getattr(m, 'updated_at', None) else None,
+        })
+
+    # Quiz results
+    quiz_q = QuizResult.query.filter_by(student_id=current_user_id).order_by(QuizResult.created_at.desc()).limit(20).all()
+    quizzes = []
+    for q in quiz_q:
+        quiz_obj = Quiz.query.get(q.quiz_id)
+        quizzes.append({
+            'quiz_id': q.quiz_id,
+            'title': quiz_obj.title if quiz_obj else '',
+            'score': q.score,
+            'created_at': q.created_at.isoformat() if getattr(q, 'created_at', None) else None,
+        })
+
+    # Aggregate simple score: sum of mission + quiz scores
+    total_score = 0
+    for m in missions:
+        total_score += int(m.get('score', 0) or 0)
+    for q in quizzes:
+        total_score += int(q.get('score', 0) or 0)
+
+    return jsonify({
+        'user': user.to_dict(),
+        'role': user.role,
+        'total_score': total_score,
+        'playtime_logs': playtime_logs,
+        'missions': missions,
+        'quizzes': quizzes,
+    }), 200
+
     return jsonify({
         'id': quiz.id,
         'title': quiz.title,

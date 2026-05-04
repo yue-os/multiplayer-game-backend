@@ -174,43 +174,60 @@ class LobbySocketHub:
             await recipient_socket.send_json({"event": "game_state", "data": data})
 
     async def start_event_timer(self, lobby_id: str) -> None:
+        iteration_count = 0
         while True:
-            await asyncio.sleep(60)
+            try:
+                await asyncio.sleep(60)
 
-            if lobby_id not in self._lobbies:
-                return
-            if not self._connections.get(lobby_id):
-                return
+                if lobby_id not in self._lobbies:
+                    print(f"[Timer] Lobby {lobby_id} no longer exists, exiting timer.")
+                    return
+                if not self._connections.get(lobby_id):
+                    print(f"[Timer] No connections in lobby {lobby_id}, exiting timer.")
+                    return
 
-            runtime = self._lobbies[lobby_id]
-            runtime.game_state.current_round += 1
-            current_round = runtime.game_state.current_round
-            max_rounds = runtime.game_state.max_rounds
+                runtime = self._lobbies[lobby_id]
+                runtime.game_state.current_round += 1
+                current_round = runtime.game_state.current_round
+                max_rounds = runtime.game_state.max_rounds
+                iteration_count += 1
 
-            announcement = runtime.engine.rotate_event()
-            hints = self._build_event_hints(runtime.game_state.current_event)
+                print(f"[Timer] Lobby {lobby_id} - Round {current_round}/{max_rounds}")
 
-            await self._broadcast_to_lobby(
-                lobby_id,
-                {
-                    "event": "location_event",
-                    "data": {
-                        "current_event": runtime.game_state.current_event.value,
-                        "announcement": announcement,
-                        "hints": hints,
-                        "round": current_round,
-                        "max_rounds": max_rounds,
+                announcement = runtime.engine.rotate_event()
+                hints = self._build_event_hints(runtime.game_state.current_event)
+
+                await self._broadcast_to_lobby(
+                    lobby_id,
+                    {
+                        "event": "location_event",
+                        "data": {
+                            "current_event": runtime.game_state.current_event.value,
+                            "announcement": announcement,
+                            "hints": hints,
+                            "round": current_round,
+                            "max_rounds": max_rounds,
+                        },
                     },
-                },
-            )
+                )
 
-            if current_round >= max_rounds:
-                scores = runtime.engine.compute_scores()
-                await self.broadcast_game_state(lobby_id, game_over=True, scores=scores)
+                if current_round >= max_rounds:
+                    print(f"[Timer] Lobby {lobby_id} game over at round {current_round}. Computing scores...")
+                    scores = runtime.engine.compute_scores()
+                    print(f"[Timer] Lobby {lobby_id} scores computed: {scores}")
+                    await self.broadcast_game_state(lobby_id, game_over=True, scores=scores)
+                    print(f"[Timer] Lobby {lobby_id} game_over broadcast sent. Cleaning up...")
+                    self._cleanup_lobby(lobby_id)
+                    print(f"[Timer] Lobby {lobby_id} cleaned up. Timer exiting.")
+                    return
+
+                await self.broadcast_game_state(lobby_id)
+            except Exception as e:
+                print(f"[Timer] ERROR in lobby {lobby_id} at iteration {iteration_count}: {e}")
+                import traceback
+                traceback.print_exc()
                 self._cleanup_lobby(lobby_id)
                 return
-
-            await self.broadcast_game_state(lobby_id)
 
     def _cleanup_lobby(self, lobby_id: str) -> None:
         runtime = self._lobbies.pop(lobby_id, None)
