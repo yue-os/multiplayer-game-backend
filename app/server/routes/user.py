@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from app.server.database import db
-from app.server.models.user import Class, Message, Quiz, QuizResult, User
+from app.server.models.user import Class, Message, Mission, MissionProgress, PlaytimeLog, Quiz, QuizResult, User
 from app.server.models.announcement import Announcement
 from app.auth.auth_handler import signJWT
 from app.auth.auth_bearer import token_required
@@ -219,6 +219,13 @@ def student_get_quiz(quiz_id):
             'points': q.points,
         })
 
+    return jsonify({
+        'id': quiz.id,
+        'title': quiz.title,
+        'timer_seconds': quiz.timer_seconds,
+        'questions': questions,
+    }), 200
+
 
 @user_bp.route('/user/game-history', methods=['GET'])
 @token_required
@@ -285,12 +292,37 @@ def get_game_history():
         'quizzes': quizzes,
     }), 200
 
-    return jsonify({
-        'id': quiz.id,
-        'title': quiz.title,
-        'timer_seconds': quiz.timer_seconds,
-        'questions': questions,
-    }), 200
+
+@user_bp.route('/user/playtime', methods=['POST'])
+@token_required
+def post_playtime():
+    """Record a playtime session for the current user.
+    Expects JSON: { "duration_minutes": <int> }
+    """
+    current_user_id = int(request.current_user_id)
+    user = User.query.get(current_user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    data = request.get_json(silent=True) or {}
+    try:
+        duration = int(data.get('duration_minutes', 0))
+    except Exception:
+        return jsonify({'error': 'Invalid duration value'}), 400
+
+    if duration <= 0:
+        return jsonify({'error': 'Duration must be > 0'}), 400
+
+    # Create log entry
+    try:
+        log = PlaytimeLog(user_id=current_user_id, duration_minutes=duration)
+        db.session.add(log)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Failed to record playtime', 'details': str(e)}), 500
+
+    return jsonify({'ok': True, 'duration_minutes': duration, 'id': log.id}), 201
 
 
 @user_bp.route('/student/quiz/<quiz_id>/submit', methods=['POST'])
