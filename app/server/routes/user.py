@@ -92,9 +92,14 @@ def change_password():
         return jsonify({'error': 'Incorrect current password'}), 403
 
     user.password_hash = generate_password_hash(new_password)
+    user.must_change_password = False
     db.session.commit()
 
-    return jsonify({'message': 'Password changed successfully'}), 200
+    return jsonify({
+        'message': 'Password changed successfully',
+        'must_change_password': False,
+        'mustChangePassword': False,
+    }), 200
 
 @user_bp.route('/user/profile', methods=['GET'])
 @token_required

@@ -1,8 +1,8 @@
 from flask import Blueprint, jsonify, request
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from app.auth.auth_bearer import token_required
 from app.server.database import db
-from app.server.models.user import User, Message, QuizResult, Quiz, MissionProgress, PlaytimeLog
+from app.server.models.user import Class, User, Message, QuizResult, Quiz, MissionProgress, PlaytimeLog
 
 parent_bp = Blueprint('parent', __name__)
 
@@ -50,8 +50,10 @@ def get_parent_feedback():
             'id': msg.id,
             'public_id': msg.public_id,
             'sender_id': msg.sender_id,
+            'sender_public_id': msg.sender.public_id,
             'sender_name': f"{msg.sender.first_name} {msg.sender.last_name}".strip() or msg.sender.username,
             'receiver_id': msg.receiver_id,
+            'receiver_public_id': msg.receiver.public_id,
             'receiver_name': f"{msg.receiver.first_name} {msg.receiver.last_name}".strip() or msg.receiver.username,
             'content': msg.content,
             'created_at': msg.created_at.isoformat() if msg.created_at else None,
@@ -81,6 +83,76 @@ def get_parent_feedback():
     }), 200
 
 
+@parent_bp.route('/api/messages', methods=['GET'])
+@token_required
+def list_parent_messages():
+    response, status_code = get_parent_feedback()
+    if status_code != 200:
+        return response, status_code
+
+    data = response.get_json(silent=True) or {}
+    return jsonify(data.get('feedback') or []), 200
+
+
+@parent_bp.route('/api/messages', methods=['POST'])
+@token_required
+def send_parent_message():
+    guard = _parent_guard()
+    if guard:
+        return guard
+
+    parent_id = int(request.current_user_id)
+    data = request.get_json(silent=True) or {}
+    receiver_public_id = str(data.get('receiver_public_id') or '').strip()
+    content = str(data.get('content') or data.get('message') or '').strip()
+
+    if not receiver_public_id:
+        return jsonify({'error': 'receiver_public_id is required'}), 400
+
+    if not content:
+        return jsonify({'error': 'content is required'}), 400
+
+    receiver = User.query.filter_by(public_id=receiver_public_id, role='Teacher').first()
+    if not receiver:
+        return jsonify({'error': 'Teacher not found'}), 404
+
+    parent_children = User.query.filter_by(parent_id=parent_id, role='Student').all()
+    child_class_ids = {child.class_id for child in parent_children if child.class_id is not None}
+    if child_class_ids:
+        teacher_has_child_class = Quiz.query.filter(
+            Quiz.teacher_id == receiver.id,
+            Quiz.class_id.in_(child_class_ids),
+        ).first()
+    else:
+        teacher_has_child_class = None
+
+    if not teacher_has_child_class:
+        teacher_has_child_class = Class.query.filter(
+            Class.teacher_id == receiver.id,
+            Class.id.in_(child_class_ids),
+        ).first() if child_class_ids else None
+
+    if parent_children and not teacher_has_child_class:
+        return jsonify({'error': 'You can only message teachers connected to your linked children.'}), 403
+
+    message = Message(sender_id=parent_id, receiver_id=receiver.id, content=content)
+    db.session.add(message)
+    db.session.commit()
+
+    return jsonify({
+        'message': 'Message sent successfully',
+        'data': {
+            'id': message.id,
+            'public_id': message.public_id,
+            'sender_id': message.sender_id,
+            'receiver_id': message.receiver_id,
+            'receiver_public_id': receiver.public_id,
+            'content': message.content,
+            'created_at': message.created_at.isoformat() if message.created_at else None,
+        },
+    }), 201
+
+
 @parent_bp.route('/parent/feedback/<int:message_id>', methods=['GET'])
 @token_required
 def get_feedback_detail(message_id):
@@ -107,8 +179,10 @@ def get_feedback_detail(message_id):
         'id': message.id,
         'public_id': message.public_id,
         'sender_id': message.sender_id,
+        'sender_public_id': message.sender.public_id,
         'sender_name': f"{message.sender.first_name} {message.sender.last_name}".strip() or message.sender.username,
         'receiver_id': message.receiver_id,
+        'receiver_public_id': message.receiver.public_id,
         'receiver_name': f"{message.receiver.first_name} {message.receiver.last_name}".strip() or message.receiver.username,
         'content': message.content,
         'created_at': message.created_at.isoformat() if message.created_at else None,
@@ -223,15 +297,24 @@ def link_child():
 
     parent_id = int(request.current_user_id)
     data = request.get_json(silent=True) or {}
-    child_username = (data.get('child_username') or '').strip()
+    child_username = (data.get('child_username') or data.get('child_identifier') or '').strip()
     
     if not child_username:
         return jsonify({'error': 'child_username is required'}), 400
     
-    # Find student by username
-    student = User.query.filter_by(username=child_username, role='Student').first()
+    lowered_identifier = child_username.lower()
+    full_name = func.lower(func.trim(User.first_name + ' ' + User.last_name))
+    student = User.query.filter(
+        User.role == 'Student',
+        or_(
+            func.lower(User.username) == lowered_identifier,
+            func.lower(User.email) == lowered_identifier,
+            func.lower(User.public_id) == lowered_identifier,
+            full_name == lowered_identifier,
+        ),
+    ).first()
     if not student:
-        return jsonify({'error': 'Student not found'}), 404
+        return jsonify({'error': 'Student not found. Enter the student username, email, public ID, or full name.'}), 404
     
     # Check if already linked to another parent
     if student.parent_id and student.parent_id != parent_id:

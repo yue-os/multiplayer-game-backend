@@ -7,12 +7,13 @@ from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
 from sqlalchemy import case, func
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.security import generate_password_hash
 
 from app.auth.auth_bearer import token_required
 from app.server.database import db
-from app.server.models.user import Class, GameServer, MissionProgress, PlaytimeLog, QuizResult, User
+from app.server.models.announcement import Announcement
+from app.server.models.user import Class, GameServer, Message, MissionProgress, PlaytimeLog, Quiz, QuizResult, User
 
 
 admin_users_bp = Blueprint("admin_users", __name__)
@@ -233,8 +234,19 @@ def delete_class(class_id: int):
     for student in students:
         student.class_id = None
 
-    db.session.delete(classroom)
-    db.session.commit()
+    class_quizzes = Quiz.query.filter_by(class_id=classroom.id).all()
+    for quiz in class_quizzes:
+        quiz.class_id = None
+
+    GameServer.query.filter_by(class_id=classroom.id).delete(synchronize_session=False)
+    Announcement.query.filter_by(class_id=classroom.id).delete(synchronize_session=False)
+
+    try:
+        db.session.delete(classroom)
+        db.session.commit()
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        return jsonify({"error": "Unable to delete class", "detail": str(exc)}), 500
 
     return jsonify({"message": "Class deleted successfully.", "class_id": class_id}), 200
 
@@ -472,8 +484,45 @@ def delete_user(user_id: int):
     if user is None:
         return jsonify({"error": "User not found"}), 404
 
-    db.session.delete(user)
-    db.session.commit()
+    if user.role == "Admin" and User.query.filter_by(role="Admin").count() <= 1:
+        return jsonify({"error": "Cannot delete the last admin account"}), 400
+
+    if user.role == "Teacher":
+        teacher_classes = Class.query.filter_by(teacher_id=user.id).all()
+        teacher_quizzes = Quiz.query.filter_by(teacher_id=user.id).all()
+        replacement_teacher = User.query.filter(User.role == "Teacher", User.id != user.id).order_by(User.id.asc()).first()
+        if (teacher_classes or teacher_quizzes) and replacement_teacher is None:
+            return jsonify({"error": "Assign this teacher's classes/quizzes to another teacher before deleting the only teacher account."}), 400
+
+        for classroom in teacher_classes:
+            classroom.teacher_id = replacement_teacher.id
+
+        for quiz in teacher_quizzes:
+            quiz.teacher_id = replacement_teacher.id
+
+        Announcement.query.filter_by(teacher_id=user.id).delete(synchronize_session=False)
+        GameServer.query.filter_by(owner_teacher_id=user.id).delete(synchronize_session=False)
+
+    if user.role == "Parent":
+        for child in User.query.filter_by(parent_id=user.id, role="Student").all():
+            child.parent_id = None
+
+    if user.role == "Student":
+        QuizResult.query.filter_by(student_id=user.id).delete(synchronize_session=False)
+        MissionProgress.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+        PlaytimeLog.query.filter_by(user_id=user.id).delete(synchronize_session=False)
+
+    Message.query.filter(
+        (Message.sender_id == user.id) | (Message.receiver_id == user.id)
+    ).delete(synchronize_session=False)
+
+    try:
+        db.session.delete(user)
+        db.session.commit()
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        return jsonify({"error": "Unable to delete user", "detail": str(exc)}), 500
+
     return jsonify({"message": "User deleted successfully.", "user_id": user_id}), 200
 
 

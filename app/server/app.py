@@ -1,5 +1,6 @@
-from flask import Flask
+from flask import Flask, jsonify, request
 from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 from app.server.database import init_db
 from app.server.routes.user import user_bp
 from app.server.routes.appRoutes import app_bp
@@ -8,11 +9,29 @@ from app.server.routes.parent import parent_bp
 from app.server.routes.docs import docs_bp
 from app.server.routes.admin_users_flask import admin_users_bp
 import os
+import re
+from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
 LAN_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?"
+LAN_ORIGIN_PATTERN = re.compile(f"^{LAN_ORIGIN_REGEX}$")
+
+
+def _is_allowed_origin(origin: Optional[str]) -> bool:
+    return bool(origin and LAN_ORIGIN_PATTERN.match(origin))
+
+
+def _add_cors_headers(response):
+    origin = request.headers.get("Origin")
+    if _is_allowed_origin(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept, Origin"
+        response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, POST, OPTIONS, PUT, PATCH, DELETE"
+    return response
 
 def create_app():
     app = Flask(__name__)
@@ -33,6 +52,22 @@ def create_app():
         allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
         methods=["GET", "HEAD", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"],
     )
+
+    @app.after_request
+    def add_cors_headers(response):
+        return _add_cors_headers(response)
+
+    @app.errorhandler(Exception)
+    def handle_unexpected_error(error):
+        if isinstance(error, HTTPException):
+            response = jsonify({"error": error.description})
+            response.status_code = error.code or 500
+            return _add_cors_headers(response)
+
+        app.logger.exception("Unhandled server error", exc_info=error)
+        response = jsonify({"error": "Unexpected server error", "detail": str(error)})
+        response.status_code = 500
+        return _add_cors_headers(response)
     
     # Initialize Database
     init_db(app)
