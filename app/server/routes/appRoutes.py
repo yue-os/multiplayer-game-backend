@@ -83,8 +83,6 @@ def list_servers():
         # treat current players as 0 and keep room in "Not yet started" state.
         current_players = int(s.player_count or 0) if is_recently_active else 0
         required_players = max(1, int(s.required_players or 2))
-        if is_teacher_lobby and required_players < 2:
-            required_players = 2
 
         # Started means the room is actively running and has reached a playable threshold.
         is_started = is_recently_active and current_players >= required_players
@@ -102,6 +100,7 @@ def list_servers():
             "name": s.name,
             "count": current_players,
             "persistent": bool(s.persistent),
+            "teacher_lobby": is_teacher_lobby,
             "online": is_online,
             "joinable": is_online,
             "current_players": current_players,

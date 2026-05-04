@@ -827,7 +827,7 @@ def create_lobby():
 
         existing.name = server_name
         existing.player_count = player_count
-        existing.required_players = max(2, player_count)
+        existing.required_players = max(1, player_count)
         existing.last_heartbeat = time.time()
         existing.persistent = True
         existing.owner_teacher_id = teacher_id
@@ -859,7 +859,7 @@ def create_lobby():
         ip=ip,
         port=port,
         player_count=player_count,
-        required_players=max(2, player_count),
+        required_players=max(1, player_count),
         last_heartbeat=time.time(),
         persistent=True,
         owner_teacher_id=teacher_id,

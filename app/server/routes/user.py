@@ -310,6 +310,45 @@ def student_submit_quiz(quiz_id):
     }), 201
 
 
+@user_bp.route('/student/class/options', methods=['GET'])
+@token_required
+def student_class_options():
+    student_id = int(request.current_user_id)
+    student = User.query.get(student_id)
+    if not student or student.role != 'Student':
+        return jsonify({'error': 'Student not found'}), 404
+
+    classes = Class.query.order_by(Class.name.asc()).all()
+    sections = [str(classroom.name).strip() for classroom in classes if str(classroom.name).strip() != '']
+
+    return jsonify({'sections': sections}), 200
+
+
+@user_bp.route('/student/class/join', methods=['POST'])
+@token_required
+def student_class_join():
+    student_id = int(request.current_user_id)
+    student = User.query.get(student_id)
+    if not student or student.role != 'Student':
+        return jsonify({'error': 'Student not found'}), 404
+
+    data = request.json
+    section_name = (data.get('section') or '').strip() if data else ''
+    if not section_name:
+        return jsonify({'error': 'Section name is required'}), 400
+
+    # Find the class by section name
+    classroom = Class.query.filter_by(name=section_name).first()
+    if not classroom:
+        return jsonify({'error': 'Class section not found'}), 404
+
+    # Assign student to this class
+    student.class_id = classroom.id
+    db.session.commit()
+
+    return jsonify({'message': 'Successfully joined class', 'section': classroom.name}), 200
+
+
 @user_bp.route('/student/class', methods=['GET'])
 @token_required
 def student_class_info():
