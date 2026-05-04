@@ -1,4 +1,6 @@
 from datetime import datetime
+import os
+import secrets
 import time
 
 from flask import Blueprint, jsonify, request
@@ -48,6 +50,66 @@ def _serialize_quiz(quiz: Quiz):
         'questions_count': len(ordered_questions),
         'questions': [_serialize_quiz_question(question) for question in ordered_questions],
     }
+
+
+def _serialize_lobby(lobby: GameServer, classroom, teacher_id: int):
+    return {
+        'id': lobby.id,
+        'public_id': lobby.public_id,
+        'name': lobby.name,
+        'ip': lobby.ip,
+        'port': lobby.port,
+        'player_count': lobby.player_count,
+        'required_players': lobby.required_players,
+        'persistent': lobby.persistent,
+        'owner_teacher_id': lobby.owner_teacher_id,
+        'class_id': lobby.class_id,
+        'class_public_id': classroom.public_id if classroom else None,
+        'class_name': classroom.name if classroom else None,
+        'teacher_id': teacher_id,
+    }
+
+
+def _generated_lobby_host():
+    configured_host = os.getenv('LOBBY_HOST_IP', '').strip()
+    if configured_host:
+        return configured_host
+
+    host = (request.host or '').split(':', 1)[0].strip()
+    if host:
+        return host
+
+    return (request.remote_addr or '127.0.0.1').strip()
+
+
+def _port_range():
+    try:
+        port_min = int(os.getenv('LOBBY_PORT_MIN', '50000'))
+        port_max = int(os.getenv('LOBBY_PORT_MAX', '59999'))
+    except ValueError:
+        return 50000, 59999
+
+    if port_min <= 0 or port_max > 65535 or port_min > port_max:
+        return 50000, 59999
+
+    return port_min, port_max
+
+
+def _allocate_lobby_endpoint():
+    host = _generated_lobby_host()
+    port_min, port_max = _port_range()
+    span = port_max - port_min + 1
+
+    for _ in range(min(span, 100)):
+        port = port_min + secrets.randbelow(span)
+        if not GameServer.query.filter_by(ip=host, port=port).first():
+            return host, port
+
+    for port in range(port_min, port_max + 1):
+        if not GameServer.query.filter_by(ip=host, port=port).first():
+            return host, port
+
+    raise RuntimeError('No available lobby endpoints')
 
 
 def _teacher_guard():
@@ -785,9 +847,9 @@ def create_lobby():
 
     class_public_id = (data.get('class_public_id') or '').strip()
     name = (data.get('name') or '').strip()
-    ip = (data.get('ip') or '').strip()
-    port = data.get('port')
-    player_count = data.get('player_count', 0)
+    requested_ip = (data.get('ip') or '').strip()
+    requested_port = data.get('port')
+    required_players = data.get('required_players', data.get('player_count', 5))
 
     if not class_public_id:
         return jsonify({'error': 'class_public_id is required'}), 400
@@ -796,70 +858,39 @@ def create_lobby():
     if not classroom:
         return jsonify({'error': 'Class not found or not owned by teacher'}), 403
 
-    if not ip or port is None:
-        return jsonify(
-            {
-                'error': 'ip and port are required to create a lobby record',
-                'integration': {
-                    'option': 'Use existing /server/register heartbeat flow',
-                    'instruction': 'Start your game server and POST {name, port, count} to /server/register from the game host.',
-                    'tip': f'Include class metadata in name, for example: {classroom.name} Lobby',
-                },
-            }
-        ), 400
-
     try:
-        port = int(port)
-        player_count = int(player_count)
-        if port <= 0:
-            raise ValueError
-        if player_count < 0:
+        required_players = int(required_players)
+        if required_players not in range(5, 10):
             raise ValueError
     except (TypeError, ValueError):
-        return jsonify({'error': 'port must be positive and player_count must be >= 0'}), 400
+        return jsonify({'error': 'required_players must be one of 5, 6, 7, 8, or 9'}), 400
 
     server_name = name if name else f'{classroom.name} Lobby'
 
-    existing = GameServer.query.filter_by(ip=ip, port=port).first()
-    if existing:
-        if existing.owner_teacher_id is not None and existing.owner_teacher_id != teacher_id:
-            return jsonify({'error': 'This lobby endpoint is owned by another teacher'}), 403
+    if requested_ip and requested_port is not None:
+        try:
+            port = int(requested_port)
+            if port <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({'error': 'port must be a positive integer'}), 400
 
-        existing.name = server_name
-        existing.player_count = player_count
-        existing.required_players = max(1, player_count)
-        existing.last_heartbeat = time.time()
-        existing.persistent = True
-        existing.owner_teacher_id = teacher_id
-        existing.class_id = classroom.id
-        db.session.commit()
-        return jsonify(
-            {
-                'message': 'Lobby updated successfully',
-                'lobby': {
-                    'id': existing.id,
-                    'public_id': existing.public_id,
-                    'name': existing.name,
-                    'ip': existing.ip,
-                    'port': existing.port,
-                    'player_count': existing.player_count,
-                    'required_players': existing.required_players,
-                    'persistent': existing.persistent,
-                    'owner_teacher_id': existing.owner_teacher_id,
-                    'class_id': classroom.id,
-                    'class_public_id': classroom.public_id,
-                    'class_name': classroom.name,
-                    'teacher_id': teacher_id,
-                },
-            }
-        ), 200
+        ip = requested_ip
+        existing = GameServer.query.filter_by(ip=ip, port=port).first()
+        if existing:
+            return jsonify({'error': 'Generated lobby endpoint is already in use. Refresh lobbies and try again.'}), 409
+    else:
+        try:
+            ip, port = _allocate_lobby_endpoint()
+        except RuntimeError:
+            return jsonify({'error': 'No available lobby endpoints'}), 503
 
     lobby = GameServer(
         name=server_name,
         ip=ip,
         port=port,
-        player_count=player_count,
-        required_players=max(1, player_count),
+        player_count=0,
+        required_players=required_players,
         last_heartbeat=time.time(),
         persistent=True,
         owner_teacher_id=teacher_id,
@@ -871,21 +902,7 @@ def create_lobby():
     return jsonify(
         {
             'message': 'Lobby created successfully',
-            'lobby': {
-                'id': lobby.id,
-                'public_id': lobby.public_id,
-                'name': lobby.name,
-                'ip': lobby.ip,
-                'port': lobby.port,
-                'player_count': lobby.player_count,
-                'required_players': lobby.required_players,
-                'persistent': lobby.persistent,
-                'owner_teacher_id': lobby.owner_teacher_id,
-                'class_id': classroom.id,
-                'class_public_id': classroom.public_id,
-                'class_name': classroom.name,
-                'teacher_id': teacher_id,
-            },
+            'lobby': _serialize_lobby(lobby, classroom, teacher_id),
         }
     ), 201
 
@@ -904,22 +921,7 @@ def list_teacher_lobbies():
     payload = []
     for lobby in lobbies:
         classroom = class_map.get(lobby.class_id)
-        payload.append(
-            {
-                'id': lobby.id,
-                'public_id': lobby.public_id,
-                'name': lobby.name,
-                'ip': lobby.ip,
-                'port': lobby.port,
-                'player_count': lobby.player_count,
-                'required_players': lobby.required_players,
-                'persistent': lobby.persistent,
-                'class_id': lobby.class_id,
-                'class_public_id': classroom.public_id if classroom else None,
-                'class_name': classroom.name if classroom else None,
-                'teacher_id': teacher_id,
-            }
-        )
+        payload.append(_serialize_lobby(lobby, classroom, teacher_id))
 
     return jsonify({'lobbies': payload}), 200
 
