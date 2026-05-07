@@ -24,6 +24,9 @@ class User(db.Model, TimestampMixin, PublicIdMixin):
     # Relationship: Student -> Class (Many Students in one Class)
     class_id = db.Column(db.Integer, db.ForeignKey('classes.id'), nullable=True)
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
     def to_dict(self):
         return {
             "id": self.id,
@@ -115,6 +118,9 @@ class QuizResult(db.Model, TimestampMixin, PublicIdMixin):
     student_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     score = db.Column(db.Integer, nullable=False)
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
 class PasswordResetRequest(db.Model, TimestampMixin, PublicIdMixin):
     __tablename__ = 'password_reset_requests'
 
@@ -131,6 +137,9 @@ class PasswordResetRequest(db.Model, TimestampMixin, PublicIdMixin):
     rejected_reason = db.Column(db.Text, nullable=True)
     email_sent_at = db.Column(db.DateTime, nullable=True)
     activity_log = db.Column(db.JSON, nullable=True)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     user = db.relationship('User', foreign_keys=[user_id], backref='password_reset_requests')
     approved_by = db.relationship('User', foreign_keys=[approved_by_id])
@@ -178,3 +187,6 @@ class PlaytimeLog(db.Model, PublicIdMixin):
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     date = db.Column(db.Date, default=datetime.utcnow().date)
     duration_minutes = db.Column(db.Integer, default=0)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)

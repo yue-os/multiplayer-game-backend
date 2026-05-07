@@ -1,3 +1,4 @@
+
 from datetime import datetime, timezone
 import hashlib
 import secrets
@@ -16,6 +17,9 @@ RESET_ALLOWED_ROLES = {'Student', 'Teacher', 'Parent'}
 # In-memory storage for seen notifications to avoid showing them repeatedly
 SEEN_NOTIFICATIONS = {}
 
+# In-memory storage for 2-step registration OTP verification
+PENDING_REGISTRATIONS = {}
+
 @user_bp.route('/auth/register', methods=['POST'])
 def register():
     data = request.json
@@ -32,18 +36,69 @@ def register():
     if User.query.filter((User.username == username) | (User.email == email)).first():
         return jsonify({'error': 'User already exists'}), 400
 
+    # Also check pending (not-yet-verified) registrations for conflicts
+    for pending_email, pending_data in PENDING_REGISTRATIONS.items():
+        if pending_email == email or pending_data['username'] == username:
+            return jsonify({'error': 'A registration for this username or email is already pending verification'}), 409
+
     hashed_pw = generate_password_hash(password)
-    new_user = User(
-        first_name=first_name,
-        last_name=last_name,
-        username=username,
-        email=email,
-        password_hash=hashed_pw,
-        role=role,
-    )
     
-    db.session.add(new_user)
-    db.session.commit()
+    otp = str(secrets.randbelow(1000000)).zfill(6)
+    PENDING_REGISTRATIONS[email] = {
+        'first_name': first_name,
+        'last_name': last_name,
+        'username': username,
+        'email': email,
+        'password_hash': hashed_pw,
+        'role': role,
+        'otp': otp
+    }
+    
+    print(f"MOCK EMAIL: Sending OTP {otp} to {email}")
+
+    return jsonify({'message': 'OTP sent', 'email': email, 'require_otp': True}), 200
+
+@user_bp.route('/auth/verify-otp', methods=['POST'])
+def verify_otp():
+    data = request.json or {}
+    email = data.get('email')
+    otp = data.get('otp')
+
+    if not email or not otp:
+        return jsonify({'error': 'Email and OTP are required'}), 400
+
+    pending = PENDING_REGISTRATIONS.get(email)
+    if not pending:
+        return jsonify({'error': 'No pending registration found for this email'}), 404
+
+    if pending['otp'] != str(otp).strip():
+        return jsonify({'error': 'Invalid OTP'}), 400
+
+    # Re-check the DB right before insert to guard against races
+    if User.query.filter(
+        (User.username == pending['username']) | (User.email == pending['email'])
+    ).first():
+        del PENDING_REGISTRATIONS[email]
+        return jsonify({'error': 'User already exists'}), 400
+
+    new_user = User( 
+        first_name=pending['first_name'],
+        last_name=pending['last_name'],
+        username=pending['username'],
+        email=pending['email'],
+        password_hash=pending['password_hash'],
+        role=pending['role'],
+    )
+
+    try:
+        db.session.add(new_user)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        del PENDING_REGISTRATIONS[email]
+        return jsonify({'error': 'Failed to create user. Please try registering again.'}), 500
+
+    del PENDING_REGISTRATIONS[email]
 
     return jsonify({'message': 'User registered successfully'}), 201
 
@@ -117,7 +172,7 @@ def forgot_password():
         return jsonify({'error': 'Email and a valid role are required'}), 400
 
     user = User.query.filter(func.lower(User.email) == email, User.role == role).first()
-    reset_request = PasswordResetRequest(
+    reset_request = PasswordResetRequest(  # pyre-ignore[unexpected-keyword]
         user_id=user.id if user else None,
         email=email,
         role=role,
@@ -431,7 +486,7 @@ def post_playtime():
 
     # Create log entry
     try:
-        log = PlaytimeLog(user_id=current_user_id, duration_minutes=duration)
+        log = PlaytimeLog(user_id=current_user_id, duration_minutes=duration)  # pyre-ignore[unexpected-keyword]
         db.session.add(log)
         db.session.commit()
     except Exception as e:
@@ -525,7 +580,7 @@ def student_submit_quiz(quiz_id):
     
     percentage = round((score / total_points) * 100.0, 1)
 
-    result = QuizResult(quiz_id=quiz_id_int, student_id=student_id, score=percentage)
+    result = QuizResult(quiz_id=quiz_id_int, student_id=student_id, score=percentage)  # pyre-ignore[unexpected-keyword]
     db.session.add(result)
     db.session.commit()
 
