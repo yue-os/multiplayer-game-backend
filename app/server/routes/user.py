@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from flask import Blueprint, request, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from app.server.database import db
@@ -162,7 +163,12 @@ def get_student_notifications():
     seen = SEEN_NOTIFICATIONS[student_id]
     notifications = []
 
-    latest_announcement = Announcement.query.filter_by(class_id=student.class_id).order_by(Announcement.created_at.desc()).first()
+    latest_announcement = None
+    for a in Announcement.query.filter_by(class_id=student.class_id).order_by(Announcement.created_at.desc()).all():
+        if not getattr(a, 'is_hidden', False):
+            latest_announcement = a
+            break
+
     if latest_announcement and latest_announcement.id not in seen['announcements']:
         notifications.append({
             'id': latest_announcement.id,
@@ -172,7 +178,12 @@ def get_student_notifications():
         })
         seen['announcements'].add(latest_announcement.id)
 
-    latest_quiz = Quiz.query.filter_by(class_id=student.class_id).order_by(Quiz.id.desc()).first()
+    latest_quiz = None
+    for q in Quiz.query.filter_by(class_id=student.class_id).order_by(Quiz.id.desc()).all():
+        if not getattr(q, 'timer_seconds', 0):
+            latest_quiz = q
+            break
+
     if latest_quiz and latest_quiz.id not in seen['quizzes']:
         notifications.append({
             'id': latest_quiz.id,
@@ -201,6 +212,18 @@ def student_get_quiz(quiz_id):
     if not quiz:
         return jsonify({'error': 'Quiz not found'}), 404
 
+    if getattr(quiz, 'timer_seconds', 0):
+        return jsonify({'error': 'This quiz is currently hidden by the teacher'}), 403
+
+    status = 'Open'
+    is_closed = False
+    if quiz.start_date:
+        now = datetime.now(timezone.utc)
+        quiz_deadline = quiz.start_date.replace(tzinfo=timezone.utc) if quiz.start_date.tzinfo is None else quiz.start_date
+        if now > quiz_deadline:
+            is_closed = True
+            status = 'Closed'
+
     if quiz.class_id != student.class_id:
         return jsonify({'error': 'This quiz is not assigned to your class'}), 403
 
@@ -222,7 +245,9 @@ def student_get_quiz(quiz_id):
     return jsonify({
         'id': quiz.id,
         'title': quiz.title,
-        'timer_seconds': quiz.timer_seconds,
+        'answer_until': quiz.start_date.isoformat() if quiz.start_date else None,
+        'status': status,
+        'is_closed': is_closed,
         'questions': questions,
     }), 200
 
@@ -341,6 +366,15 @@ def student_submit_quiz(quiz_id):
     quiz = Quiz.query.get(quiz_id_int)
     if not quiz:
         return jsonify({'error': 'Quiz not found'}), 404
+
+    if getattr(quiz, 'timer_seconds', 0):
+        return jsonify({'error': 'This quiz is currently hidden and cannot be submitted'}), 403
+
+    if quiz.start_date:
+        now = datetime.now(timezone.utc)
+        quiz_deadline = quiz.start_date.replace(tzinfo=timezone.utc) if quiz.start_date.tzinfo is None else quiz.start_date
+        if now > quiz_deadline:
+            return jsonify({'error': 'This quiz is no longer accepting submissions.'}), 403
 
     if quiz.class_id != student.class_id:
         return jsonify({'error': 'This quiz is not assigned to your class'}), 403
@@ -474,10 +508,13 @@ def student_class_info():
         teacher_name = full if full else teacher.username
 
     # All quizzes assigned to this class
-    all_quizzes = Quiz.query.filter_by(class_id=classroom.id).order_by(Quiz.start_date.asc()).all()
+    all_quizzes_raw = Quiz.query.filter_by(class_id=classroom.id).order_by(Quiz.id.asc()).all()
+    all_quizzes = [q for q in all_quizzes_raw if not getattr(q, 'timer_seconds', 0)]
     
     # All announcements for this class
-    all_announcements = Announcement.query.filter_by(class_id=classroom.id).order_by(Announcement.created_at.desc()).all()
+    all_announcements_raw = Announcement.query.filter_by(class_id=classroom.id).order_by(Announcement.created_at.desc()).all()
+    all_announcements = [a for a in all_announcements_raw if not getattr(a, 'is_hidden', False)]
+
     announcement_payload = [{
         'id': a.id,
         'title': a.title,
@@ -507,13 +544,26 @@ def student_class_info():
     pending = []
     completed = []
     for quiz in all_quizzes:
+        status = 'Open'
+        is_closed = False
+        if quiz.start_date:
+            now = datetime.now(timezone.utc)
+            quiz_deadline = quiz.start_date.replace(tzinfo=timezone.utc) if quiz.start_date.tzinfo is None else quiz.start_date
+            if now > quiz_deadline:
+                is_closed = True
+                status = 'Closed'
+            elif (quiz_deadline - now).total_seconds() < 3600 * 24:
+                status = 'Closing Soon'
+
         result = result_by_quiz.get(quiz.id)
         if result is None:
             pending.append({
                 'id': quiz.id,
                 'public_id': quiz.public_id,
                 'title': quiz.title,
-                'due_date': quiz.start_date.strftime('%b %d, %Y') if quiz.start_date else '—',
+                'answer_until': quiz.start_date.isoformat() if quiz.start_date else None,
+                'status': status,
+                'is_closed': is_closed,
                 'questions_count': len(quiz.questions or []),
                 'completed': False,
             })
@@ -524,6 +574,9 @@ def student_class_info():
                 'title': quiz.title,
                 'score': f"{result.score}%",
                 'feedback': feedback_by_result.get(result.id, ''),
+                'answer_until': quiz.start_date.isoformat() if quiz.start_date else None,
+                'status': status,
+                'is_closed': is_closed,
                 'completed': True,
             })
 

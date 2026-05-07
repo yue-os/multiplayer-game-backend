@@ -135,7 +135,52 @@ def _ensure_quiz_columns(app, inspector):
         db.session.execute(text("ALTER TABLE quizzes ADD COLUMN class_id INTEGER"))
         modified = True
 
+    quiz_columns = {
+        'description': 'TEXT',
+        'status': "VARCHAR(20) DEFAULT 'published'",
+        'allow_retakes': 'BOOLEAN DEFAULT TRUE',
+        'shuffle_questions': 'BOOLEAN DEFAULT FALSE',
+        'shuffle_choices': 'BOOLEAN DEFAULT FALSE',
+        'auto_grade': 'BOOLEAN DEFAULT TRUE',
+        'show_correct_answers': 'BOOLEAN DEFAULT FALSE',
+        'require_all_questions': 'BOOLEAN DEFAULT TRUE',
+        'instant_feedback': 'BOOLEAN DEFAULT FALSE',
+        'passing_score': 'INTEGER DEFAULT 70',
+    }
+
+    for column_name, column_definition in quiz_columns.items():
+        if column_name not in columns:
+            db.session.execute(text(f"ALTER TABLE quizzes ADD COLUMN {column_name} {column_definition}"))
+            modified = True
+
     if modified:
+        db.session.execute(text("UPDATE quizzes SET status = 'published' WHERE status IS NULL"))
+        db.session.execute(text("UPDATE quizzes SET allow_retakes = TRUE WHERE allow_retakes IS NULL"))
+        db.session.execute(text("UPDATE quizzes SET shuffle_questions = FALSE WHERE shuffle_questions IS NULL"))
+        db.session.execute(text("UPDATE quizzes SET shuffle_choices = FALSE WHERE shuffle_choices IS NULL"))
+        db.session.execute(text("UPDATE quizzes SET auto_grade = TRUE WHERE auto_grade IS NULL"))
+        db.session.execute(text("UPDATE quizzes SET show_correct_answers = FALSE WHERE show_correct_answers IS NULL"))
+        db.session.execute(text("UPDATE quizzes SET require_all_questions = TRUE WHERE require_all_questions IS NULL"))
+        db.session.execute(text("UPDATE quizzes SET instant_feedback = FALSE WHERE instant_feedback IS NULL"))
+        db.session.execute(text("UPDATE quizzes SET passing_score = 70 WHERE passing_score IS NULL"))
+        db.session.commit()
+
+    if not inspector.has_table('quiz_questions'):
+        return
+
+    question_columns = {col['name'] for col in inspector.get_columns('quiz_questions')}
+    question_modified = False
+
+    if 'description' not in question_columns:
+        db.session.execute(text("ALTER TABLE quiz_questions ADD COLUMN description TEXT"))
+        question_modified = True
+
+    if 'required' not in question_columns:
+        db.session.execute(text("ALTER TABLE quiz_questions ADD COLUMN required BOOLEAN DEFAULT TRUE"))
+        question_modified = True
+
+    if question_modified:
+        db.session.execute(text("UPDATE quiz_questions SET required = TRUE WHERE required IS NULL"))
         db.session.commit()
 
 def _ensure_messages_columns(app, inspector):

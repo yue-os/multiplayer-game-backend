@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import secrets
 import time
@@ -77,27 +77,161 @@ def _serialize_quiz_question(question: QuizQuestion):
         'public_id': question.public_id,
         'type': question.type,
         'text': question.text,
+        'description': getattr(question, 'description', None),
         'options': question.options,
         'correct_answer': question.correct_answer,
         'points': question.points,
         'order': question.order,
+        'required': bool(getattr(question, 'required', True)),
     }
 
 
 def _serialize_quiz(quiz: Quiz):
     ordered_questions = sorted(quiz.questions or [], key=lambda question: (question.order or 0, question.id or 0))
+    deadline = quiz.start_date
+    now = datetime.now(timezone.utc)
+    if deadline and deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    saved_status = getattr(quiz, 'status', None) or 'published'
+    status = 'closed' if saved_status == 'published' and deadline and deadline <= now else saved_status
     return {
         'id': quiz.id,
         'public_id': quiz.public_id,
         'teacher_id': quiz.teacher_id,
         'class_id': quiz.class_id,
         'title': quiz.title,
-        'timer_seconds': quiz.timer_seconds,
-        'start_date': quiz.start_date.isoformat() if quiz.start_date else None,
+        'description': getattr(quiz, 'description', None),
+        'status': status,
+        'is_hidden': bool(getattr(quiz, 'timer_seconds', 0)), # Renamed, repurposed for is_hidden
+        'answer_until': quiz.start_date.isoformat() if quiz.start_date else None,
+        'allow_retakes': bool(getattr(quiz, 'allow_retakes', True)),
+        'shuffle_questions': bool(getattr(quiz, 'shuffle_questions', False)),
+        'shuffle_choices': bool(getattr(quiz, 'shuffle_choices', False)),
+        'auto_grade': bool(getattr(quiz, 'auto_grade', True)),
+        'show_correct_answers': bool(getattr(quiz, 'show_correct_answers', False)),
+        'require_all_questions': bool(getattr(quiz, 'require_all_questions', True)),
+        'instant_feedback': bool(getattr(quiz, 'instant_feedback', False)),
+        'passing_score': getattr(quiz, 'passing_score', 70),
         'questions_count': len(ordered_questions),
         'questions': [_serialize_quiz_question(question) for question in ordered_questions],
+        'created_at': quiz.created_at.isoformat() if quiz.created_at else None,
+        'submission_count': getattr(quiz, 'submission_count', 0), # Placeholder for now, requires a query
     }
 
+
+def _parse_quiz_datetime(value):
+    if not value:
+        return None, None
+
+    try:
+        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except ValueError:
+        return None, 'Answer Until must be a valid date and time.'
+
+    return parsed, None
+
+
+def _normalize_quiz_payload(data, teacher_id, existing_quiz=None):
+    title = (data.get('title') or '').strip()
+    status = (data.get('status') or getattr(existing_quiz, 'status', None) or 'published').strip().lower()
+    class_id = data.get('class_id', getattr(existing_quiz, 'class_id', None))
+    questions = data.get('questions', [])
+
+    if status not in {'draft', 'published', 'closed'}:
+        return None, ('Quiz status must be Draft, Published, or Closed.', 400)
+
+    if not title:
+        return None, ('Quiz title is required.', 400)
+
+    if class_id:
+        classroom = Class.query.filter_by(id=class_id, teacher_id=teacher_id).first()
+        if not classroom:
+            return None, ('Class not found or not owned by teacher.', 404)
+        class_id = classroom.id
+
+    if not isinstance(questions, list):
+        return None, ('Quiz questions must be a list.', 400)
+
+    valid_questions = []
+    for idx, question in enumerate(questions):
+        if not isinstance(question, dict):
+            continue
+        question_text = (question.get('text') or '').strip()
+        if not question_text:
+            continue
+        question_type = str(question.get('type') or 'multiple_choice').strip()
+        if question_type not in {'multiple_choice', 'true_false', 'identification'}:
+            return None, (f'Question {idx + 1} has an unsupported type.', 400)
+        options = question.get('options') if isinstance(question.get('options'), list) else []
+        if question_type == 'multiple_choice' and status == 'published' and len([opt for opt in options if str(opt).strip()]) < 2:
+            return None, (f'Question {idx + 1} needs at least two options.', 400)
+        valid_questions.append((idx, question_text, question_type, options, question))
+
+    if status == 'published' and not valid_questions:
+        return None, ('Add at least one question before publishing.', 400)
+
+    answer_until, datetime_error = _parse_quiz_datetime(data.get('answer_until'))
+    if datetime_error:
+        return None, (datetime_error, 400)
+
+    if status == 'published' and answer_until:
+        comparable_deadline = answer_until if answer_until.tzinfo else answer_until.replace(tzinfo=timezone.utc)
+        if comparable_deadline <= datetime.now(timezone.utc):
+            return None, ('Answer Until must be in the future before publishing.', 400)
+
+    return {
+        'title': title,
+        'class_id': class_id,
+        'questions': valid_questions,
+        'answer_until': answer_until,
+        'description': data.get('description') or '',
+        'status': status,
+        'is_hidden': bool(data.get('is_hidden', getattr(existing_quiz, 'timer_seconds', 0) if existing_quiz else False)),
+        'allow_retakes': bool(data.get('allow_retakes', getattr(existing_quiz, 'allow_retakes', True))),
+        'shuffle_questions': bool(data.get('shuffle_questions', getattr(existing_quiz, 'shuffle_questions', False))),
+        'shuffle_choices': bool(data.get('shuffle_choices', getattr(existing_quiz, 'shuffle_choices', False))),
+        'auto_grade': bool(data.get('auto_grade', getattr(existing_quiz, 'auto_grade', True))),
+        'show_correct_answers': bool(data.get('show_correct_answers', getattr(existing_quiz, 'show_correct_answers', False))),
+        'require_all_questions': bool(data.get('require_all_questions', getattr(existing_quiz, 'require_all_questions', True))),
+        'instant_feedback': bool(data.get('instant_feedback', getattr(existing_quiz, 'instant_feedback', False))),
+        'passing_score': int(data.get('passing_score') or getattr(existing_quiz, 'passing_score', 70) or 70),
+    }, None
+
+
+def _apply_quiz_payload(quiz, payload):
+    quiz.title = payload['title']
+    quiz.description = payload['description']
+    quiz.class_id = payload['class_id']
+    quiz.start_date = payload['answer_until']
+    quiz.status = payload['status']
+    quiz.timer_seconds = 1 if payload['is_hidden'] or payload['status'] == 'draft' else 0
+    quiz.allow_retakes = payload['allow_retakes']
+    quiz.shuffle_questions = payload['shuffle_questions']
+    quiz.shuffle_choices = payload['shuffle_choices']
+    quiz.auto_grade = payload['auto_grade']
+    quiz.show_correct_answers = payload['show_correct_answers']
+    quiz.require_all_questions = payload['require_all_questions']
+    quiz.instant_feedback = payload['instant_feedback']
+    quiz.passing_score = payload['passing_score']
+
+
+def _replace_quiz_questions(quiz, valid_questions):
+    QuizQuestion.query.filter_by(quiz_id=quiz.id).delete()
+
+    for order, (_, question_text, question_type, options, source) in enumerate(valid_questions):
+        db.session.add(
+            QuizQuestion(
+                quiz_id=quiz.id,
+                type=question_type,
+                text=question_text,
+                description=(source.get('description') or '').strip() or None,
+                options=options if question_type == 'multiple_choice' else [],
+                correct_answer=str(source.get('correct_answer', '')).strip() or None,
+                points=int(source.get('points', 1)) if source.get('points') else 1,
+                order=order,
+                required=bool(source.get('required', True)),
+            )
+        )
 
 def _serialize_lobby(lobby: GameServer, classroom, teacher_id: int):
     return {
@@ -428,73 +562,30 @@ def create_quiz():
         return guard
 
     data = request.get_json(silent=True) or {}
-    title = (data.get('title') or '').strip()
-    timer_seconds = data.get('timer_seconds', 300)
-    start_date_raw = data.get('start_date')
-    class_id = data.get('class_id')
-    questions = data.get('questions', [])
-
-    if not title:
-        return jsonify({'error': 'title is required'}), 400
-
-    try:
-        timer_seconds = int(timer_seconds)
-        if timer_seconds <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({'error': 'timer_seconds must be a positive integer'}), 400
-
-    try:
-        if start_date_raw:
-            start_date = datetime.fromisoformat(str(start_date_raw).replace('Z', '+00:00'))
-        else:
-            start_date = datetime.utcnow()
-    except ValueError:
-        return jsonify({'error': 'start_date must be a valid ISO-8601 datetime'}), 400
-
     teacher_id = int(request.current_user_id)
-    
-    # Validate class_id if provided
-    if class_id:
-        classroom = Class.query.filter_by(id=class_id, teacher_id=teacher_id).first()
-        if not classroom:
-            return jsonify({'error': 'Class not found or not owned by teacher'}), 404
-        class_id = classroom.id
+
+    payload, error = _normalize_quiz_payload(data, teacher_id)
+    if error:
+        message, status_code = error
+        return jsonify({'error': message}), status_code
 
     quiz = Quiz(
         teacher_id=teacher_id,
-        class_id=class_id,
-        title=title,
-        timer_seconds=timer_seconds,
-        start_date=start_date,
+        class_id=payload['class_id'],
+        title=payload['title'],
     )
 
     db.session.add(quiz)
     db.session.flush()
 
-    # Persist questions to database
-    for idx, q in enumerate(questions):
-        if not isinstance(q, dict):
-            continue
-        question_text = (q.get('text') or '').strip()
-        if not question_text:
-            continue
-        question = QuizQuestion(
-            quiz_id=quiz.id,
-            type=str(q.get('type', 'multiple_choice')).strip(),
-            text=question_text,
-            options=q.get('options'),  # List of options for multiple choice
-            correct_answer=str(q.get('correct_answer', '')).strip() or None,
-            points=int(q.get('points', 1)) if q.get('points') else 1,
-            order=idx,
-        )
-        db.session.add(question)
+    _apply_quiz_payload(quiz, payload)
+    _replace_quiz_questions(quiz, payload['questions'])
 
     db.session.commit()
 
     return jsonify(
         {
-            'message': 'Quiz created successfully with questions',
+            'message': 'Draft saved successfully' if payload['status'] == 'draft' else 'Quiz published successfully',
             'quiz': _serialize_quiz(quiz),
         }
     ), 201
@@ -506,15 +597,24 @@ def list_teacher_quizzes():
     guard = _teacher_guard()
     if guard:
         return guard
-
+    
+    # Add student submission count to each quiz
+    quiz_submissions = db.session.query(QuizResult.quiz_id, func.count(QuizResult.id).label('submission_count')) \
+        .group_by(QuizResult.quiz_id).all()
+    submission_counts = {item.quiz_id: item.submission_count for item in quiz_submissions}
+    
     teacher_id = int(request.current_user_id)
     quizzes = (
         Quiz.query.filter_by(teacher_id=teacher_id)
-        .order_by(Quiz.start_date.desc(), Quiz.id.desc())
+        .order_by(Quiz.id.desc())
         .all()
     )
 
-    return jsonify({'quizzes': [_serialize_quiz(quiz) for quiz in quizzes]}), 200
+    serialized_quizzes = []
+    for quiz in quizzes:
+        quiz.submission_count = submission_counts.get(quiz.id, 0)
+        serialized_quizzes.append(_serialize_quiz(quiz))
+    return jsonify({'quizzes': serialized_quizzes}), 200
 
 
 @teacher_bp.route('/teacher/quiz/results', methods=['GET'])
@@ -526,6 +626,7 @@ def list_teacher_quiz_results():
 
     teacher_id = int(request.current_user_id)
     class_id = request.args.get('class_id', type=int)
+    quiz_id = request.args.get('quiz_id', type=int)
 
     teacher_classes = Class.query.filter_by(teacher_id=teacher_id).all()
     teacher_class_ids = [classroom.id for classroom in teacher_classes]
@@ -535,16 +636,22 @@ def list_teacher_quiz_results():
     if class_id is not None and class_id not in teacher_class_ids:
         return jsonify({'error': 'Class not found or not owned by teacher'}), 404
 
-    active_class_ids = [class_id] if class_id is not None else teacher_class_ids
+    selected_quiz = None
+    if quiz_id is not None:
+        selected_quiz = Quiz.query.filter_by(id=quiz_id, teacher_id=teacher_id).first()
+        if not selected_quiz:
+            return jsonify({'error': 'Quiz not found or not owned by teacher'}), 404
 
-    rows = (
+    active_class_ids = [class_id] if class_id is not None else teacher_class_ids
+    query = (
         db.session.query(QuizResult, Quiz, User)
         .join(Quiz, Quiz.id == QuizResult.quiz_id)
         .join(User, User.id == QuizResult.student_id)
         .filter(Quiz.teacher_id == teacher_id, User.class_id.in_(active_class_ids))
-        .order_by(QuizResult.updated_at.desc(), QuizResult.id.desc())
-        .all()
     )
+    if quiz_id is not None:
+        query = query.filter(Quiz.id == quiz_id)
+    rows = query.order_by(QuizResult.updated_at.desc(), QuizResult.id.desc()).all()
 
     parent_ids = sorted({student.parent_id for _, _, student in rows if student.parent_id is not None})
     parent_map = {}
@@ -571,7 +678,6 @@ def list_teacher_quiz_results():
                 'quiz_public_id': quiz.public_id,
                 'quiz_title': quiz.title,
                 'quiz_class_id': quiz.class_id,
-                'quiz_start_date': quiz.start_date.isoformat() if quiz.start_date else None,
                 'student_id': student.id,
                 'student_public_id': student.public_id,
                 'student_name': student_name,
@@ -587,7 +693,7 @@ def list_teacher_quiz_results():
             }
         )
 
-    return jsonify({'results': payload}), 200
+    return jsonify({'quiz': _serialize_quiz(selected_quiz) if selected_quiz else None, 'results': payload}), 200
 
 
 @teacher_bp.route('/teacher/quiz/result/<int:result_id>', methods=['DELETE'])
@@ -669,65 +775,34 @@ def manage_teacher_quiz(quiz_id: int):
         return jsonify({'message': 'Quiz and all its results deleted successfully', 'quiz_id': quiz_id}), 200
 
     data = request.get_json(silent=True) or {}
-    title = (data.get('title') or '').strip()
-    timer_seconds = data.get('timer_seconds', quiz.timer_seconds)
-    start_date_raw = data.get('start_date')
-    class_id = data.get('class_id', quiz.class_id)
-    questions = data.get('questions', [])
+    payload, error = _normalize_quiz_payload(data, teacher_id, quiz)
+    if error:
+        message, status_code = error
+        return jsonify({'error': message}), status_code
 
-    if not title:
-        return jsonify({'error': 'title is required'}), 400
-
-    try:
-        timer_seconds = int(timer_seconds)
-        if timer_seconds <= 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({'error': 'timer_seconds must be a positive integer'}), 400
-
-    try:
-        if start_date_raw:
-            start_date = datetime.fromisoformat(str(start_date_raw).replace('Z', '+00:00'))
-        else:
-            start_date = quiz.start_date or datetime.utcnow()
-    except ValueError:
-        return jsonify({'error': 'start_date must be a valid ISO-8601 datetime'}), 400
-
-    if class_id:
-        classroom = Class.query.filter_by(id=class_id, teacher_id=teacher_id).first()
-        if not classroom:
-            return jsonify({'error': 'Class not found or not owned by teacher'}), 404
-        class_id = classroom.id
-
-    quiz.title = title
-    quiz.timer_seconds = timer_seconds
-    quiz.start_date = start_date
-    quiz.class_id = class_id
-
-    QuizQuestion.query.filter_by(quiz_id=quiz.id).delete()
-
-    for idx, q in enumerate(questions):
-        if not isinstance(q, dict):
-            continue
-        question_text = (q.get('text') or '').strip()
-        if not question_text:
-            continue
-        db.session.add(
-            QuizQuestion(
-                quiz_id=quiz.id,
-                type=str(q.get('type', 'multiple_choice')).strip(),
-                text=question_text,
-                options=q.get('options'),
-                correct_answer=str(q.get('correct_answer', '')).strip() or None,
-                points=int(q.get('points', 1)) if q.get('points') else 1,
-                order=idx,
-            )
-        )
+    _apply_quiz_payload(quiz, payload)
+    _replace_quiz_questions(quiz, payload['questions'])
 
     db.session.commit()
     db.session.refresh(quiz)
 
-    return jsonify({'message': 'Quiz updated successfully', 'quiz': _serialize_quiz(quiz)}), 200
+    return jsonify({'message': 'Draft saved successfully' if payload['status'] == 'draft' else 'Quiz updated successfully', 'quiz': _serialize_quiz(quiz)}), 200
+
+
+@teacher_bp.route('/teacher/quiz/<int:quiz_id>/toggle_visibility', methods=['PATCH'])
+@token_required
+def toggle_quiz_visibility(quiz_id: int):
+    guard = _teacher_guard()
+    if guard:
+        return guard
+    teacher_id = int(request.current_user_id)
+    quiz = Quiz.query.filter_by(id=quiz_id, teacher_id=teacher_id).first()
+    if not quiz:
+        return jsonify({'error': 'Quiz not found or not owned by teacher'}), 404
+    current_hidden = bool(getattr(quiz, 'timer_seconds', 0))
+    quiz.timer_seconds = 0 if current_hidden else 1
+    db.session.commit()
+    return jsonify({'message': 'Visibility toggled', 'is_hidden': not current_hidden}), 200
 
 
 @teacher_bp.route('/teacher/message', methods=['POST'])
@@ -886,6 +961,7 @@ def create_announcement():
         return jsonify({'error': 'Class not found or not owned by teacher'}), 403
 
     announcement = Announcement(class_id=class_id, teacher_id=teacher_id, title=title, message=message)
+    setattr(announcement, 'is_hidden', False)
     db.session.add(announcement)
     db.session.commit()
 
@@ -904,7 +980,13 @@ def list_announcements():
     # Fetch all announcements for the teacher's classes
     announcements = Announcement.query.filter_by(teacher_id=teacher_id).order_by(Announcement.created_at.desc()).all()
 
-    return jsonify({'announcements': [a.to_dict() for a in announcements]}), 200
+    payload = []
+    for a in announcements:
+        d = a.to_dict()
+        d['is_hidden'] = getattr(a, 'is_hidden', False)
+        payload.append(d)
+
+    return jsonify({'announcements': payload}), 200
 
 
 @teacher_bp.route('/teacher/announcement/<int:announcement_id>', methods=['DELETE'])
@@ -924,6 +1006,22 @@ def delete_announcement(announcement_id: int):
     db.session.commit()
 
     return jsonify({'message': 'Announcement deleted successfully', 'id': announcement_id}), 200
+
+
+@teacher_bp.route('/teacher/announcement/<int:announcement_id>/toggle_visibility', methods=['PATCH'])
+@token_required
+def toggle_announcement_visibility(announcement_id: int):
+    guard = _teacher_guard()
+    if guard:
+        return guard
+    teacher_id = int(request.current_user_id)
+    announcement = Announcement.query.filter_by(id=announcement_id, teacher_id=teacher_id).first()
+    if not announcement:
+        return jsonify({'error': 'Announcement not found or not owned by teacher'}), 404
+    current_hidden = getattr(announcement, 'is_hidden', False)
+    setattr(announcement, 'is_hidden', not current_hidden)
+    db.session.commit()
+    return jsonify({'message': 'Visibility toggled', 'is_hidden': not current_hidden}), 200
 
 
 @teacher_bp.route('/teacher/lobby/create', methods=['POST'])

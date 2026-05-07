@@ -79,8 +79,18 @@ class Quiz(db.Model, TimestampMixin, PublicIdMixin):
     teacher_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     class_id = db.Column(db.Integer, db.ForeignKey('classes.id'), nullable=True)
     title = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(20), nullable=False, default='published')  # draft, published, closed
     timer_seconds = db.Column(db.Integer, default=300)
     start_date = db.Column(db.DateTime, default=datetime.utcnow)
+    allow_retakes = db.Column(db.Boolean, nullable=False, default=True)
+    shuffle_questions = db.Column(db.Boolean, nullable=False, default=False)
+    shuffle_choices = db.Column(db.Boolean, nullable=False, default=False)
+    auto_grade = db.Column(db.Boolean, nullable=False, default=True)
+    show_correct_answers = db.Column(db.Boolean, nullable=False, default=False)
+    require_all_questions = db.Column(db.Boolean, nullable=False, default=True)
+    instant_feedback = db.Column(db.Boolean, nullable=False, default=False)
+    passing_score = db.Column(db.Integer, nullable=False, default=70)
     questions = db.relationship('QuizQuestion', backref='quiz', cascade='all, delete-orphan', lazy=True)
 
 class QuizQuestion(db.Model, TimestampMixin, PublicIdMixin):
@@ -90,10 +100,12 @@ class QuizQuestion(db.Model, TimestampMixin, PublicIdMixin):
     quiz_id = db.Column(db.Integer, db.ForeignKey('quizzes.id'), nullable=False)
     type = db.Column(db.String(50), default='multiple_choice')  # multiple_choice, true_false, short_answer
     text = db.Column(db.Text, nullable=False)
+    description = db.Column(db.Text, nullable=True)
     options = db.Column(db.JSON, nullable=True)  # For multiple choice: ['option1', 'option2', ...]
     correct_answer = db.Column(db.String(255), nullable=True)  # Index or text of correct answer
     points = db.Column(db.Integer, default=1)
     order = db.Column(db.Integer, default=0)  # For maintaining question order
+    required = db.Column(db.Boolean, nullable=False, default=True)
 
 class QuizResult(db.Model, TimestampMixin, PublicIdMixin):
     __tablename__ = 'quiz_results'
