@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-
+    "nodemailer": "^6.9.16"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

@@ -115,6 +115,26 @@ class QuizResult(db.Model, TimestampMixin, PublicIdMixin):
     student_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     score = db.Column(db.Integer, nullable=False)
 
+class PasswordResetRequest(db.Model, TimestampMixin, PublicIdMixin):
+    __tablename__ = 'password_reset_requests'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    email = db.Column(db.String(120), nullable=False, index=True)
+    role = db.Column(db.String(20), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='Pending')  # Pending, Approved, Rejected, Used, Expired
+    token_hash = db.Column(db.String(64), nullable=True, index=True)
+    token_expires_at = db.Column(db.DateTime, nullable=True)
+    approved_by_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    reviewed_at = db.Column(db.DateTime, nullable=True)
+    used_at = db.Column(db.DateTime, nullable=True)
+    rejected_reason = db.Column(db.Text, nullable=True)
+    email_sent_at = db.Column(db.DateTime, nullable=True)
+    activity_log = db.Column(db.JSON, nullable=True)
+
+    user = db.relationship('User', foreign_keys=[user_id], backref='password_reset_requests')
+    approved_by = db.relationship('User', foreign_keys=[approved_by_id])
+
 class Message(db.Model, TimestampMixin, PublicIdMixin):
     __tablename__ = 'messages'
 

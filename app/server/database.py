@@ -21,6 +21,7 @@ def _ensure_public_ids(app, inspector):
         (user.MissionProgress, 'mission_progress'),
         (user.Quiz, 'quizzes'),
         (user.QuizResult, 'quiz_results'),
+        (user.PasswordResetRequest, 'password_reset_requests'),
         (user.Message, 'messages'),
         (user.GameServer, 'game_servers'),
         (user.PlaytimeLog, 'playtime_logs'),

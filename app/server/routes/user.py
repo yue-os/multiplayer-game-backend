@@ -1,13 +1,17 @@
 from datetime import datetime, timezone
+import hashlib
+import secrets
 from flask import Blueprint, request, jsonify
+from sqlalchemy import func
 from werkzeug.security import generate_password_hash, check_password_hash
 from app.server.database import db
-from app.server.models.user import Class, Message, Mission, MissionProgress, PlaytimeLog, Quiz, QuizResult, User
+from app.server.models.user import Class, Message, Mission, MissionProgress, PasswordResetRequest, PlaytimeLog, Quiz, QuizResult, User
 from app.server.models.announcement import Announcement
 from app.auth.auth_handler import signJWT
 from app.auth.auth_bearer import token_required
 
 user_bp = Blueprint('user', __name__)
+RESET_ALLOWED_ROLES = {'Student', 'Teacher', 'Parent'}
 
 # In-memory storage for seen notifications to avoid showing them repeatedly
 SEEN_NOTIFICATIONS = {}
@@ -102,6 +106,92 @@ def change_password():
         'mustChangePassword': False,
     }), 200
 
+
+@user_bp.route('/auth/forgot-password', methods=['POST'])
+def forgot_password():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get('email') or '').strip().lower()
+    role = str(data.get('role') or '').strip()
+
+    if not email or role not in RESET_ALLOWED_ROLES:
+        return jsonify({'error': 'Email and a valid role are required'}), 400
+
+    user = User.query.filter(func.lower(User.email) == email, User.role == role).first()
+    reset_request = PasswordResetRequest(
+        user_id=user.id if user else None,
+        email=email,
+        role=role,
+        status='Pending',
+        activity_log=[
+            {
+                'event': 'requested',
+                'at': datetime.utcnow().isoformat(),
+                'ip': request.remote_addr,
+                'matched_user': bool(user),
+            }
+        ],
+    )
+    db.session.add(reset_request)
+    db.session.commit()
+
+    return jsonify({
+        'message': 'If this account exists, your reset request was sent to the administrator for review.'
+    }), 202
+
+
+@user_bp.route('/auth/password-reset/verify', methods=['GET'])
+def verify_password_reset_token():
+    token = str(request.args.get('token') or '').strip()
+    if not token:
+        return jsonify({'error': 'Reset token is required'}), 400
+
+    token_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()
+    reset_request = PasswordResetRequest.query.filter_by(token_hash=token_hash, status='Approved').first()
+    now = datetime.utcnow()
+    if not reset_request or reset_request.used_at or not reset_request.token_expires_at or reset_request.token_expires_at <= now:
+        if reset_request and reset_request.status == 'Approved':
+            reset_request.status = 'Expired'
+            reset_request.activity_log = (reset_request.activity_log or []) + [{'event': 'expired_verify', 'at': now.isoformat()}]
+            db.session.commit()
+        return jsonify({'error': 'This reset link is invalid or expired'}), 400
+
+    return jsonify({'email': reset_request.email, 'role': reset_request.role, 'expires_at': reset_request.token_expires_at.isoformat()}), 200
+
+
+@user_bp.route('/auth/password-reset/complete', methods=['POST'])
+def complete_password_reset():
+    data = request.get_json(silent=True) or {}
+    token = str(data.get('token') or '').strip()
+    new_password = str(data.get('new_password') or '')
+
+    if not token or len(new_password) < 8:
+        return jsonify({'error': 'A valid reset token and a password of at least 8 characters are required'}), 400
+
+    token_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()
+    reset_request = PasswordResetRequest.query.filter_by(token_hash=token_hash, status='Approved').first()
+    now = datetime.utcnow()
+
+    if not reset_request or reset_request.used_at or not reset_request.token_expires_at or reset_request.token_expires_at <= now:
+        if reset_request and reset_request.status == 'Approved':
+            reset_request.status = 'Expired'
+            reset_request.activity_log = (reset_request.activity_log or []) + [{'event': 'expired_complete', 'at': now.isoformat()}]
+            db.session.commit()
+        return jsonify({'error': 'This reset link is invalid or expired'}), 400
+
+    user = User.query.get(reset_request.user_id) if reset_request.user_id else None
+    if not user:
+        return jsonify({'error': 'User account for this reset request no longer exists'}), 404
+
+    user.password_hash = generate_password_hash(new_password)
+    user.must_change_password = False
+    reset_request.status = 'Used'
+    reset_request.used_at = now
+    reset_request.token_hash = None
+    reset_request.activity_log = (reset_request.activity_log or []) + [{'event': 'password_reset_completed', 'at': now.isoformat()}]
+    db.session.commit()
+
+    return jsonify({'message': 'Password updated successfully. You can now log in.'}), 200
+
 @user_bp.route('/user/profile', methods=['GET'])
 @token_required
 def get_own_profile():
@@ -143,6 +233,7 @@ def update_own_profile():
 
     db.session.commit()
     return jsonify({'message': 'Profile updated successfully', 'user': user.to_dict()}), 200
+
 
 @user_bp.route('/ping', methods=['GET'])
 def ping():

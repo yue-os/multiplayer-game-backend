@@ -3,7 +3,11 @@ from __future__ import annotations
 import time
 import re
 import secrets
+import hashlib
+import os
+import subprocess
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 from sqlalchemy import case, func
@@ -13,7 +17,7 @@ from werkzeug.security import generate_password_hash
 from app.auth.auth_bearer import token_required
 from app.server.database import db
 from app.server.models.announcement import Announcement
-from app.server.models.user import Class, GameServer, Message, MissionProgress, PlaytimeLog, Quiz, QuizResult, User
+from app.server.models.user import Class, GameServer, Message, MissionProgress, PasswordResetRequest, PlaytimeLog, Quiz, QuizResult, User
 
 
 admin_users_bp = Blueprint("admin_users", __name__)
@@ -21,6 +25,7 @@ admin_users_bp = Blueprint("admin_users", __name__)
 ALLOWED_ROLES = {"Admin", "Teacher", "Parent", "Student"}
 ROLE_BY_LOWER = {role.lower(): role for role in ALLOWED_ROLES}
 CSV_ALLOWED_ROLES = {"Teacher", "Parent", "Student"}
+PASSWORD_RESET_STATUSES = {"Approved", "Rejected"}
 
 
 def _serialize_user(user: User) -> dict[str, object]:
@@ -111,6 +116,53 @@ def _valid_email(value: str) -> bool:
     return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", value))
 
 
+def _serialize_password_reset_request(item: PasswordResetRequest) -> dict[str, object]:
+    user = User.query.get(item.user_id) if item.user_id else None
+    approver = User.query.get(item.approved_by_id) if item.approved_by_id else None
+    return {
+        "id": item.id,
+        "public_id": item.public_id,
+        "user_id": item.user_id,
+        "user_email": item.email,
+        "email": item.email,
+        "role": item.role,
+        "status": item.status,
+        "request_time": item.created_at.isoformat() if item.created_at else None,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+        "reviewed_at": item.reviewed_at.isoformat() if item.reviewed_at else None,
+        "used_at": item.used_at.isoformat() if item.used_at else None,
+        "expires_at": item.token_expires_at.isoformat() if item.token_expires_at else None,
+        "email_sent_at": item.email_sent_at.isoformat() if item.email_sent_at else None,
+        "rejected_reason": item.rejected_reason,
+        "matched_user": bool(user),
+        "user_name": _full_name(user) if user else "",
+        "reviewed_by": _full_name(approver) if approver else "",
+        "activity_log": item.activity_log or [],
+    }
+
+
+def _reset_link(token: str) -> str:
+    base_url = (
+        os.getenv("PASSWORD_RESET_BASE_URL")
+        or os.getenv("FRONTEND_BASE_URL")
+        or os.getenv("RESET_LINK_BASE_URL")
+        or "http://localhost:5173"
+    ).rstrip("/")
+    return f"{base_url}/reset-password?token={token}"
+
+
+def _send_reset_email(email: str, reset_link: str) -> None:
+    script_path = Path(__file__).resolve().parents[3] / "scripts" / "send_password_reset_email.mjs"
+    subprocess.run(
+        ["node", str(script_path), email, reset_link],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ.copy(),
+        timeout=30,
+    )
+
+
 def _split_name(full_name: str) -> tuple[str, str]:
     parts = [part for part in full_name.strip().split() if part]
     if not parts:
@@ -118,6 +170,100 @@ def _split_name(full_name: str) -> tuple[str, str]:
     if len(parts) == 1:
         return parts[0], parts[0]
     return parts[0], " ".join(parts[1:])
+
+
+@admin_users_bp.route("/api/admin/password-reset-requests", methods=["GET"])
+@token_required
+def list_password_reset_requests():
+    if request.current_user_role != "Admin":
+        return jsonify({"error": "Unauthorized"}), 403
+
+    requests = (
+        PasswordResetRequest.query
+        .order_by(PasswordResetRequest.created_at.desc(), PasswordResetRequest.id.desc())
+        .all()
+    )
+    return jsonify({"requests": [_serialize_password_reset_request(item) for item in requests]}), 200
+
+
+@admin_users_bp.route("/api/admin/password-reset-requests/<int:request_id>", methods=["PATCH"])
+@token_required
+def review_password_reset_request(request_id: int):
+    if request.current_user_role != "Admin":
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data = request.get_json(silent=True) or {}
+    next_status = str(data.get("status") or "").strip().title()
+    reason = str(data.get("reason") or "").strip()
+
+    if next_status not in PASSWORD_RESET_STATUSES:
+        return jsonify({"error": "status must be Approved or Rejected"}), 400
+
+    reset_request = PasswordResetRequest.query.get(request_id)
+    if reset_request is None:
+        return jsonify({"error": "Password reset request not found"}), 404
+
+    if reset_request.status != "Pending":
+        return jsonify({"error": "Only pending reset requests can be reviewed"}), 409
+
+    now = datetime.utcnow()
+    reset_request.reviewed_at = now
+    reset_request.approved_by_id = int(request.current_user_id)
+    reset_request.activity_log = (reset_request.activity_log or []) + [
+        {"event": f"admin_{next_status.lower()}", "at": now.isoformat(), "admin_id": request.current_user_id}
+    ]
+
+    if next_status == "Rejected":
+        reset_request.status = "Rejected"
+        reset_request.rejected_reason = reason or None
+        db.session.commit()
+        return jsonify({"message": "Password reset request rejected", "request": _serialize_password_reset_request(reset_request)}), 200
+
+    user = User.query.filter(func.lower(User.email) == reset_request.email.lower(), User.role == reset_request.role).first()
+    if user is None:
+        reset_request.status = "Rejected"
+        reset_request.rejected_reason = "No matching account was found for this email and role."
+        reset_request.activity_log = (reset_request.activity_log or []) + [
+            {"event": "auto_rejected_no_matching_user", "at": now.isoformat()}
+        ]
+        db.session.commit()
+        return jsonify({"error": "No matching account was found; request was rejected.", "request": _serialize_password_reset_request(reset_request)}), 404
+
+    token = secrets.token_urlsafe(32)
+    reset_request.user_id = user.id
+    reset_request.status = "Approved"
+    reset_request.token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    reset_request.token_expires_at = now + timedelta(minutes=30)
+
+    reset_link = _reset_link(token)
+    email_sent = False
+    try:
+        _send_reset_email(reset_request.email, reset_link)
+        email_sent = True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        detail = getattr(exc, "stderr", "") or str(exc)
+        print(f"Failed to send reset email: {detail}")
+
+    if email_sent:
+        reset_request.email_sent_at = datetime.utcnow()
+        reset_request.activity_log = (reset_request.activity_log or []) + [
+            {"event": "reset_email_sent", "at": reset_request.email_sent_at.isoformat(), "expires_at": reset_request.token_expires_at.isoformat()}
+        ]
+    else:
+        reset_request.activity_log = (reset_request.activity_log or []) + [
+            {"event": "reset_email_failed", "at": datetime.utcnow().isoformat()}
+        ]
+
+    db.session.commit()
+
+    response_payload = {
+        "message": "Password reset approved and email sent." if email_sent else "Password reset approved, but email failed to send.",
+        "request": _serialize_password_reset_request(reset_request),
+    }
+    if not email_sent:
+        response_payload["reset_link"] = reset_link
+
+    return jsonify(response_payload), 200
 
 
 def _normalize_import_row(row: dict[str, object]) -> dict[str, object]:
