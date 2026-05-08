@@ -11,6 +11,8 @@ from app.server.models.announcement import Announcement
 from app.auth.auth_handler import signJWT
 from app.auth.auth_bearer import token_required
 
+from app.server.services.email_service import send_otp_email
+
 user_bp = Blueprint('user', __name__)
 RESET_ALLOWED_ROLES = {'Student', 'Teacher', 'Parent'}
 
@@ -54,7 +56,8 @@ def register():
         'otp': otp
     }
     
-    print(f"MOCK EMAIL: Sending OTP {otp} to {email}")
+    # Send actual OTP email
+    send_otp_email(email, otp)
 
     return jsonify({'message': 'OTP sent', 'email': email, 'require_otp': True}), 200
 

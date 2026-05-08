@@ -41,6 +41,7 @@ def _serialize_message(message):
         'public_id': message.public_id,
         'sender_id': message.sender_id,
         'sender_public_id': message.sender.public_id,
+        'sender_username': message.sender.username,
         'sender_name': message.sender_name or legacy['sender_name'] or _user_display_name(message.sender),
         'sender_role': message.sender_role or message.sender.role,
         'receiver_id': message.receiver_id,
@@ -415,3 +416,87 @@ def unlink_child():
         'message': f'Successfully unlinked {child_username}',
         'child_username': child_username
     }), 200
+
+
+@parent_bp.route('/parent/request-link', methods=['POST'])
+def request_parent_link():
+    """
+    Public endpoint for students to request linking to a parent.
+    Does not require authentication so students can request linking before being allowed to log in
+    (since students need a parent link to log in).
+    """
+    data = request.get_json(silent=True) or {}
+    child_username = (data.get('child_username') or '').strip()
+    parent_username = (data.get('parent_username') or '').strip()
+    message_content = (data.get('message') or data.get('content') or '').strip()
+
+    if not child_username or not parent_username:
+        return jsonify({'error': 'Both child_username and parent_username are required'}), 400
+
+    # Find the child
+    student = User.query.filter_by(username=child_username, role='Student').first()
+    if not student:
+        return jsonify({'error': 'Student account not found'}), 404
+
+    # Find the parent
+    parent = User.query.filter_by(username=parent_username, role='Parent').first()
+    if not parent:
+        return jsonify({'error': 'Parent account not found. Please check the username.'}), 404
+
+    # Check if already linked
+    if student.parent_id:
+        if student.parent_id == parent.id:
+            return jsonify({'message': 'You are already linked to this parent.'}), 200
+        else:
+            return jsonify({'error': 'You are already linked to another parent.'}), 400
+
+    # Create a message/request for the parent
+    sender_display_name = _user_display_name(student)
+    
+    # We use a special format that the parent dashboard can easily see
+    # and we set student_name/class_name to ensure it shows up correctly in the feedback list
+    request_msg = Message(
+        sender_id=student.id,
+        receiver_id=parent.id,
+        sender_name=sender_display_name,
+        sender_role='Student',
+        content=message_content if message_content else f"I would like to link my student account ({child_username}) to your parent account.",
+        student_name=sender_display_name,
+        class_name="Linking Request", # Used as a label in the feedback list
+    )
+    
+    db.session.add(request_msg)
+    db.session.commit()
+
+    return jsonify({
+        'message': 'Linking request sent successfully! Please wait for your parent to approve it from their dashboard.',
+        'request_id': request_msg.id
+    }), 201
+
+
+@parent_bp.route('/parent/message/<int:message_id>', methods=['DELETE'])
+@token_required
+def delete_parent_message(message_id):
+    """
+    Delete a message received by the parent.
+    Used for dismissing notifications or denying linking requests.
+    """
+    guard = _parent_guard()
+    if guard:
+        return guard
+
+    parent_id = int(request.current_user_id)
+    message = Message.query.get(message_id)
+
+    if not message:
+        return jsonify({'error': 'Message not found'}), 404
+
+    # Ensure the parent is the receiver of the message
+    if message.receiver_id != parent_id:
+        return jsonify({'error': 'Unauthorized: you can only delete messages sent to you.'}), 403
+
+    db.session.add(message) # Not really needed before delete but standard
+    db.session.delete(message)
+    db.session.commit()
+
+    return jsonify({'message': 'Message deleted successfully'}), 200
