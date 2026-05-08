@@ -57,7 +57,9 @@ def register():
     }
     
     # Send actual OTP email
-    send_otp_email(email, otp)
+    if not send_otp_email(email, otp):
+        PENDING_REGISTRATIONS.pop(email, None)
+        return jsonify({'error': 'Unable to send OTP email. Please contact the administrator.'}), 500
 
     return jsonify({'message': 'OTP sent', 'email': email, 'require_otp': True}), 200
 
@@ -364,6 +366,9 @@ def student_get_quiz(quiz_id):
     if getattr(quiz, 'timer_seconds', 0):
         return jsonify({'error': 'This quiz is currently hidden by the teacher'}), 403
 
+    if getattr(quiz, 'status', 'published') != 'published':
+        return jsonify({'error': 'This quiz is not open yet'}), 403
+
     status = 'Open'
     is_closed = False
     if quiz.start_date:
@@ -372,6 +377,9 @@ def student_get_quiz(quiz_id):
         if now > quiz_deadline:
             is_closed = True
             status = 'Closed'
+
+    if is_closed:
+        return jsonify({'error': 'This quiz is no longer accepting submissions.'}), 403
 
     if quiz.class_id != student.class_id:
         return jsonify({'error': 'This quiz is not assigned to your class'}), 403
@@ -519,6 +527,9 @@ def student_submit_quiz(quiz_id):
     if getattr(quiz, 'timer_seconds', 0):
         return jsonify({'error': 'This quiz is currently hidden and cannot be submitted'}), 403
 
+    if getattr(quiz, 'status', 'published') != 'published':
+        return jsonify({'error': 'This quiz is not open yet'}), 403
+
     if quiz.start_date:
         now = datetime.now(timezone.utc)
         quiz_deadline = quiz.start_date.replace(tzinfo=timezone.utc) if quiz.start_date.tzinfo is None else quiz.start_date
@@ -658,7 +669,11 @@ def student_class_info():
 
     # All quizzes assigned to this class
     all_quizzes_raw = Quiz.query.filter_by(class_id=classroom.id).order_by(Quiz.id.asc()).all()
-    all_quizzes = [q for q in all_quizzes_raw if not getattr(q, 'timer_seconds', 0)]
+    all_quizzes = [
+        q
+        for q in all_quizzes_raw
+        if not getattr(q, 'timer_seconds', 0) and getattr(q, 'status', 'published') == 'published'
+    ]
     
     # All announcements for this class
     all_announcements_raw = Announcement.query.filter_by(class_id=classroom.id).order_by(Announcement.created_at.desc()).all()
@@ -705,7 +720,7 @@ def student_class_info():
                 status = 'Closing Soon'
 
         result = result_by_quiz.get(quiz.id)
-        if result is None:
+        if result is None and not is_closed:
             pending.append({
                 'id': quiz.id,
                 'public_id': quiz.public_id,
@@ -716,7 +731,7 @@ def student_class_info():
                 'questions_count': len(quiz.questions or []),
                 'completed': False,
             })
-        else:
+        elif result is not None:
             completed.append({
                 'id': quiz.id,
                 'public_id': quiz.public_id,
