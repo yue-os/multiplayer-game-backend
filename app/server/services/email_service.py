@@ -2,6 +2,7 @@ import smtplib
 import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.image import MIMEImage
 
 def send_otp_email(to_email: str, otp: str):
     """
@@ -19,6 +20,9 @@ def send_otp_email(to_email: str, otp: str):
     <html>
     <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px;">
         <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 30px; border-radius: 10px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);">
+            <div style="text-align: center; margin-bottom: 20px;">
+                <img src="cid:logo" alt="BatangAware Logo" style="width: 120px; height: auto;">
+            </div>
             <h2 style="color: #00b4d8; text-align: center;">Welcome to BatangAware!</h2>
             <p style="font-size: 16px; color: #333;">Thank you for registering. Please use the following One-Time Password (OTP) to verify your account:</p>
             <div style="text-align: center; margin: 30px 0;">
@@ -32,11 +36,21 @@ def send_otp_email(to_email: str, otp: str):
     </html>
     """
 
-    msg = MIMEMultipart()
+    msg = MIMEMultipart('related')
     msg['From'] = smtp_email
     msg['To'] = to_email
     msg['Subject'] = subject
     msg.attach(MIMEText(body, 'html'))
+
+    # Attach Logo
+    logo_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "assets", "logo.png")
+    if os.path.exists(logo_path):
+        with open(logo_path, 'rb') as f:
+            logo_data = f.read()
+        logo_image = MIMEImage(logo_data)
+        logo_image.add_header('Content-ID', '<logo>')
+        logo_image.add_header('Content-Disposition', 'inline', filename='logo.png')
+        msg.attach(logo_image)
 
     try:
         # Connect to Gmail SMTP server
