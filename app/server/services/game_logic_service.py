@@ -32,9 +32,9 @@ class TradeResult:
 
 class GameManager:
     REQUIRED_PLAYERS: int = 10
-    STARTING_COINS: int = 100
+    STARTING_COINS: int = 70
     CHECKLIST_SIZE: int = 5
-    STARTING_INVENTORY_SIZE: int = 3
+    STARTING_INVENTORY_SIZE: int = 4
 
     ROLE_VULNERABILITY: dict[PlayerRole, float] = {
         "Nurse": 0.35,
@@ -190,9 +190,9 @@ class GameManager:
         player_b.inventory.append(item_id)
 
         transmission_occurred = False
-        if player_a.is_infected and not player_b.is_infected:
+        if player_a.is_infected and not player_b.is_infected and player_b.role != "Nurse":
             transmission_occurred = self._calculate_transmission(player_b, player_a)
-        elif player_b.is_infected and not player_a.is_infected:
+        elif player_b.is_infected and not player_a.is_infected and player_a.role != "Nurse":
             transmission_occurred = self._calculate_transmission(player_a, player_b)
 
         return TradeResult(
@@ -221,6 +221,38 @@ class GameManager:
         if infected:
             healthy_player.is_infected = True
         return infected
+
+    def cure_infection(self, player_id: str) -> bool:
+        """Cure infection with medicine. Patient zero cannot be cured. Returns True if cure succeeded."""
+        self._assert_initialized()
+        
+        player = self._get_player_or_raise(player_id)
+        
+        # Patient zero cannot be cured
+        if player_id == self._patient_zero_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Patient zero cannot be cured.",
+            )
+        
+        # Player must be infected
+        if not player.is_infected:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Player is not infected.",
+            )
+        
+        # Player must have medicine
+        if "Vitamin-C" not in player.inventory:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Player does not have Vitamin-C (medicine) to cure infection.",
+            )
+        
+        # Remove medicine and cure infection
+        player.inventory.remove("Vitamin-C")
+        player.is_infected = False
+        return True
 
     def generate_activity_log(self) -> list[str]:
         self._assert_initialized()

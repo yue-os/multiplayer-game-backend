@@ -11,3 +11,4 @@ pydantic==2.9.2
 websockets==13.1
 aiohttp==3.10.5
 gunicorn
+asgiref

@@ -750,3 +750,90 @@ def student_class_info():
         'quizzes': pending + completed,
         'announcements': announcement_payload,
     }), 200
+
+
+@user_bp.route('/student/location-quizzes', methods=['GET'])
+@token_required
+def student_location_quizzes():
+    """Return teacher-authored class quiz questions usable during in-game location events."""
+    student_id = int(request.current_user_id)
+    student = User.query.get(student_id)
+    if not student or student.role != 'Student':
+        return jsonify({'error': 'Student not found'}), 404
+
+    if not student.class_id:
+        return jsonify({'error': 'You are not assigned to a class yet'}), 404
+
+    quizzes = (
+        Quiz.query
+        .filter_by(class_id=student.class_id)
+        .order_by(Quiz.id.asc())
+        .all()
+    )
+
+    question_bank = []
+    for quiz in quizzes:
+        if getattr(quiz, 'timer_seconds', 0):
+            continue
+        if getattr(quiz, 'status', 'published') != 'published':
+            continue
+
+        ordered_questions = sorted(quiz.questions or [], key=lambda q: (q.order or 0, q.id or 0))
+        for question in ordered_questions:
+            q_type = (question.type or '').strip().lower()
+            q_text = (question.text or '').strip()
+            if not q_text:
+                continue
+
+            options = []
+            correct_index = -1
+            raw_correct = question.correct_answer
+
+            if q_type == 'multiple_choice':
+                options = [str(opt).strip() for opt in (question.options or []) if str(opt).strip()]
+                if len(options) < 2:
+                    continue
+
+                if raw_correct is None:
+                    continue
+
+                try:
+                    correct_index = int(str(raw_correct).strip())
+                except ValueError:
+                    normalized_answer = str(raw_correct).strip().lower()
+                    for idx, opt in enumerate(options):
+                        if opt.strip().lower() == normalized_answer:
+                            correct_index = idx
+                            break
+
+                if correct_index < 0 or correct_index >= len(options):
+                    continue
+
+            elif q_type == 'true_false':
+                options = ['True', 'False']
+                normalized_answer = str(raw_correct).strip().lower()
+                if normalized_answer in ('true', '1', 'yes'):
+                    correct_index = 0
+                elif normalized_answer in ('false', '0', 'no'):
+                    correct_index = 1
+                else:
+                    continue
+            else:
+                # Skip identification/essay for round-based multiple-choice UI.
+                continue
+
+            question_bank.append({
+                'quiz_id': quiz.id,
+                'quiz_public_id': quiz.public_id,
+                'quiz_title': quiz.title,
+                'question_id': question.id,
+                'question': q_text,
+                'options': options,
+                'correct_answer': correct_index,
+                'points': int(question.points or 1),
+            })
+
+    return jsonify({
+        'count': len(question_bank),
+        'questions': question_bank,
+    }), 200
