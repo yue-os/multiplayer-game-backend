@@ -7,11 +7,11 @@ if (!recipientEmail || !resetLink) {
   process.exit(1)
 }
 
-const smtpUser = process.env.GMAIL_SMTP_USER || process.env.SMTP_GMAIL_USER
-const smtpPass = process.env.GMAIL_SMTP_APP_PASSWORD || process.env.SMTP_GMAIL_APP_PASSWORD
+const smtpUser = process.env.SMTP_EMAIL || process.env.GMAIL_SMTP_USER || process.env.SMTP_GMAIL_USER
+const smtpPass = process.env.SMTP_PASSWORD || process.env.GMAIL_SMTP_APP_PASSWORD || process.env.SMTP_GMAIL_APP_PASSWORD
 
 if (!smtpUser || !smtpPass) {
-  console.error('Gmail SMTP credentials are not configured')
+  console.error('Gmail SMTP credentials are not configured. Expected SMTP_EMAIL/SMTP_PASSWORD or GMAIL_SMTP_USER/GMAIL_SMTP_APP_PASSWORD.')
   process.exit(1)
 }
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
@@ -35,6 +36,8 @@ class LobbyRuntime(BaseModel):
     game_state: GameState
     engine: GameEngine
     timer_task: asyncio.Task[None] | None = None
+    round_started_at: float = Field(default_factory=time.monotonic)
+    round_duration_seconds: float = 60.0
 
 
 class LobbySocketHub:
@@ -58,6 +61,10 @@ class LobbySocketHub:
             lobby_runtime = LobbyRuntime(game_state=game_state, engine=GameEngine(game_state))
             self._lobbies[lobby_id] = lobby_runtime
 
+        # Ensure the lobby starts at round 1 and reset the round timer anchor
+        lobby_runtime.game_state.current_round = max(1, int(lobby_runtime.game_state.current_round))
+        lobby_runtime.round_started_at = time.monotonic()
+
         player_state = self._find_player(lobby_runtime.game_state, player_id)
         if player_state is None:
             player_state = PlayerState(
@@ -73,6 +80,9 @@ class LobbySocketHub:
 
         if lobby_runtime.timer_task is None or lobby_runtime.timer_task.done():
             lobby_runtime.timer_task = asyncio.create_task(self.start_event_timer(lobby_id))
+
+        # Send initial authoritative game state immediately so clients see round 1
+        await self.broadcast_game_state(lobby_id)
 
         return player_id
 
@@ -151,6 +161,9 @@ class LobbySocketHub:
             return
 
         players_public = [self._public_player_payload(player) for player in runtime.game_state.players]
+        now = time.monotonic()
+        elapsed = max(0.0, now - runtime.round_started_at)
+        timer_left = max(0.0, runtime.round_duration_seconds - elapsed)
 
         for recipient_id, recipient_socket in list(lobby_connections.items()):
             recipient = self._find_player(runtime.game_state, recipient_id)
@@ -163,6 +176,9 @@ class LobbySocketHub:
                 "lockdown_meter": runtime.game_state.lockdown_meter,
                 "round": runtime.game_state.current_round,
                 "max_rounds": runtime.game_state.max_rounds,
+                "server_time": time.time(),
+                "round_duration_seconds": runtime.round_duration_seconds,
+                "round_timer_left": timer_left,
                 "public_players": players_public,
                 "you": self._private_player_payload(recipient),
             }
@@ -177,7 +193,7 @@ class LobbySocketHub:
         iteration_count = 0
         while True:
             try:
-                await asyncio.sleep(60)
+                await asyncio.sleep(1)
 
                 if lobby_id not in self._lobbies:
                     print(f"[Timer] Lobby {lobby_id} no longer exists, exiting timer.")
@@ -187,6 +203,11 @@ class LobbySocketHub:
                     return
 
                 runtime = self._lobbies[lobby_id]
+                if time.monotonic() < runtime.round_started_at + runtime.round_duration_seconds:
+                    await self.broadcast_game_state(lobby_id)
+                    continue
+
+                runtime.round_started_at = time.monotonic()
                 runtime.game_state.current_round += 1
                 current_round = runtime.game_state.current_round
                 max_rounds = runtime.game_state.max_rounds
@@ -207,6 +228,9 @@ class LobbySocketHub:
                             "hints": hints,
                             "round": current_round,
                             "max_rounds": max_rounds,
+                            "server_time": time.time(),
+                            "round_duration_seconds": runtime.round_duration_seconds,
+                            "round_timer_left": runtime.round_duration_seconds,
                         },
                     },
                 )
