@@ -462,3 +462,41 @@ async def connect_to_lobby(websocket: WebSocket, lobby_id: str, player_token: st
 
 async def broadcast_game_state(lobby_id: str) -> None:
     await socket_hub.broadcast_game_state(lobby_id)
+
+
+@router.get("/lobby/list")
+async def list_ws_lobbies() -> list[dict]:
+    """
+    Return a list of currently active websocket lobbies managed in memory.
+    Each entry mirrors the `/server/list` shape enough for the Godot client
+    to display and join a relay-hosted lobby.
+    """
+    result: list[dict] = []
+    now = time.time()
+
+    # Build entries from in-memory hub state
+    for lobby_id, runtime in socket_hub._lobbies.items():
+        connections = socket_hub._connections.get(lobby_id, {})
+        current_players = len(connections)
+        required_players = int(runtime.round_duration_seconds) if runtime is not None else 2
+
+        result.append(
+            {
+                "ip": "",
+                "port": 0,
+                "name": f"{lobby_id}",
+                "count": current_players,
+                "persistent": False,
+                "teacher_lobby": False,
+                "online": True,
+                "joinable": True,
+                "current_players": current_players,
+                "required_players": required_players,
+                "started": False,
+                "status": "Relay",
+                "websocket": True,
+                "lobby_id": lobby_id,
+            }
+        )
+
+    return result

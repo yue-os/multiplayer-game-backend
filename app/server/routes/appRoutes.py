@@ -5,6 +5,7 @@ from app.auth.auth_bearer import token_required
 from sqlalchemy import or_
 import time
 from datetime import datetime
+from app.server.routes.game_sockets import socket_hub
 
 app_bp = Blueprint('app_routes', __name__)
 
@@ -108,8 +109,31 @@ def list_servers():
             "started": is_started,
             "status": status
         })
-        
-    return jsonify(server_list), 200
+        # Also include any in-memory websocket relay lobbies from socket_hub
+        try:
+            for lobby_id, runtime in socket_hub._lobbies.items():
+                connections = socket_hub._connections.get(lobby_id, {})
+                current_players = len(connections)
+                server_list.append({
+                    "ip": "",
+                    "port": 0,
+                    "name": f"{lobby_id}",
+                    "count": current_players,
+                    "persistent": False,
+                    "teacher_lobby": False,
+                    "online": True,
+                    "joinable": True,
+                    "current_players": current_players,
+                    "required_players": 2,
+                    "started": False,
+                    "status": "Relay",
+                    "websocket": True,
+                    "lobby_id": lobby_id,
+                })
+        except Exception:
+            pass
+
+        return jsonify(server_list), 200
 
 # --- Gameplay Progress ---
 
