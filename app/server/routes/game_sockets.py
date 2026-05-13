@@ -77,6 +77,21 @@ class LobbySocketHub:
                 health_status=HealthStatus.HEALTHY,
             )
             lobby_runtime.game_state.players.append(player_state)
+            
+            # Assign initial infected player if we have enough players and no one is infected yet
+            # Never make a Doctor the infected player (doctors are immune)
+            if not any(p.is_carrier for p in lobby_runtime.game_state.players):
+                # Find non-doctor players to be patient zero
+                non_doctor_players = [
+                    p for p in lobby_runtime.game_state.players
+                    if p.visible_role != VisibleRole.DOCTOR
+                ]
+                if non_doctor_players:
+                    # Use deterministic selection based on player count for consistency
+                    import random
+                    patient_zero = non_doctor_players[0]  # First non-doctor becomes patient zero
+                    patient_zero.is_carrier = True
+                    print(f"[Relay] Assigned {patient_zero.player_id} ({patient_zero.visible_role}) as patient zero")
 
         if lobby_runtime.timer_task is None or lobby_runtime.timer_task.done():
             lobby_runtime.timer_task = asyncio.create_task(self.start_event_timer(lobby_id))

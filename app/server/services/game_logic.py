@@ -74,6 +74,10 @@ class GameEngine:
 
         if target.health_status == HealthStatus.INFECTED:
             return
+        
+        # Doctors are immune to infection
+        if target.visible_role == VisibleRole.DOCTOR:
+            return
 
         infection_risk = 0.25
 
