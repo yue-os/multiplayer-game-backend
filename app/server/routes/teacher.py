@@ -244,6 +244,7 @@ def _serialize_lobby(lobby: GameServer, classroom, teacher_id: int):
         'required_players': lobby.required_players,
         'persistent': lobby.persistent,
         'owner_teacher_id': lobby.owner_teacher_id,
+        'teacher_lobby': bool(lobby.persistent and lobby.owner_teacher_id is not None),
         'class_id': lobby.class_id,
         'class_public_id': classroom.public_id if classroom else None,
         'class_name': classroom.name if classroom else None,
@@ -1049,10 +1050,10 @@ def create_lobby():
 
     try:
         required_players = int(required_players)
-        if required_players not in range(5, 10):
+        if required_players not in range(4, 10):
             raise ValueError
     except (TypeError, ValueError):
-        return jsonify({'error': 'required_players must be one of 5, 6, 7, 8, or 9'}), 400
+        return jsonify({'error': 'required_players must be one of 4, 5, 6, 7, 8, or 9'}), 400
 
     server_name = name if name else f'{classroom.name} Lobby'
 
