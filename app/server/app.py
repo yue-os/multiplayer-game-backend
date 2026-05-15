@@ -46,35 +46,15 @@ def _load_allowed_origins() -> set[str]:
 ALLOWED_ORIGINS = _load_allowed_origins()
 
 
-def _is_allowed_origin(origin: Optional[str]) -> bool:
-    if not origin:
-        return False
-    normalized = origin.rstrip("/")
-    return bool(
-        normalized in ALLOWED_ORIGINS
-        or LAN_ORIGIN_PATTERN.match(normalized)
-        or VERCEL_PREVIEW_PATTERN.match(normalized)
-    )
-
-
-def _add_cors_headers(response):
-    origin = request.headers.get("Origin")
-    if _is_allowed_origin(origin):
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Vary"] = "Origin"
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept, Origin"
-        response.headers["Access-Control-Allow-Methods"] = "GET, HEAD, POST, OPTIONS, PUT, PATCH, DELETE"
-    return response
-
 def create_app():
     app = Flask(__name__)
     
     # Configuration
     app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
     
-    # CORS Configuration for LAN and local dev
-    # Allow specified origins and common request headers (includes Content-Type)
+    # CORS Configuration
+    # We use flask-cors to handle all CORS logic including preflights (OPTIONS).
+    # We allow the specific origins from environment variables, plus local/preview patterns.
     CORS(
         app,
         resources={
@@ -85,6 +65,8 @@ def create_app():
         supports_credentials=True,
         allow_headers=["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
         methods=["GET", "HEAD", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"],
+        expose_headers=["Content-Type", "Authorization"],
+        vary_header=True
     )
 
     @app.before_request
@@ -100,10 +82,6 @@ def create_app():
                     {k: v for k, v in request.headers.items() if k.lower() not in ("content-type", "user-agent", "authorization")},
                     body)
 
-    @app.after_request
-    def add_cors_headers(response):
-        return _add_cors_headers(response)
-
     @app.route("/health", methods=["GET"])
     def health_check():
         return jsonify({"status": "ok"}), 200
@@ -113,12 +91,12 @@ def create_app():
         if isinstance(error, HTTPException):
             response = jsonify({"error": error.description})
             response.status_code = error.code or 500
-            return _add_cors_headers(response)
+            return response
 
         app.logger.exception("Unhandled server error", exc_info=error)
         response = jsonify({"error": "Unexpected server error", "detail": str(error)})
         response.status_code = 500
-        return _add_cors_headers(response)
+        return response
     
     # Initialize Database
     init_db(app)
