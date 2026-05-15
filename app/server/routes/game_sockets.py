@@ -164,6 +164,12 @@ class LobbySocketHub:
             items_offered_b=items_offered_b,
         )
 
+        # Save state to Redis and publish update
+        GameStateCache.save_state(lobby_id, runtime.game_state.model_dump())
+        redis_client = get_redis()
+        if redis_client:
+            await redis_client.publish(f"lobby:{lobby_id}:events", "update")
+
         await self._send_to_player(
             lobby_id=lobby_id,
             player_id=player_id,
@@ -259,6 +265,12 @@ class LobbySocketHub:
                 announcement = runtime.engine.rotate_event()
                 hints = self._build_event_hints(runtime.game_state.current_event)
 
+                # Save state to Redis and publish update after round rotation
+                GameStateCache.save_state(lobby_id, runtime.game_state.model_dump())
+                redis_client = get_redis()
+                if redis_client:
+                    await redis_client.publish(f"lobby:{lobby_id}:events", "update")
+
                 await self._broadcast_to_lobby(
                     lobby_id,
                     {
@@ -321,8 +333,11 @@ class LobbySocketHub:
 
     def _cleanup_lobby(self, lobby_id: str) -> None:
         runtime = self._lobbies.pop(lobby_id, None)
-        if runtime is not None and runtime.timer_task is not None:
-            runtime.timer_task.cancel()
+        if runtime is not None:
+            if runtime.timer_task is not None:
+                runtime.timer_task.cancel()
+            if runtime.subscription_task is not None:
+                runtime.subscription_task.cancel()
         self._connections.pop(lobby_id, None)
 
     def _parse_player_token(self, player_token: str) -> dict[str, str]:
