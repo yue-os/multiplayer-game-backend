@@ -12,15 +12,11 @@ from app.auth.auth_handler import signJWT
 from app.auth.auth_bearer import token_required
 
 from app.server.services.email_service import send_otp_email
+from app.cache.session_cache import RegistrationCache
+from app.cache.notification_cache import NotificationCache
 
 user_bp = Blueprint('user', __name__)
 RESET_ALLOWED_ROLES = {'Student', 'Teacher', 'Parent'}
-
-# In-memory storage for seen notifications to avoid showing them repeatedly
-SEEN_NOTIFICATIONS = {}
-
-# In-memory storage for 2-step registration OTP verification
-PENDING_REGISTRATIONS = {}
 
 @user_bp.route('/auth/register', methods=['POST'])
 def register():
@@ -39,14 +35,13 @@ def register():
         return jsonify({'error': 'User already exists'}), 400
 
     # Also check pending (not-yet-verified) registrations for conflicts
-    for pending_email, pending_data in PENDING_REGISTRATIONS.items():
-        if pending_email == email or pending_data['username'] == username:
-            return jsonify({'error': 'A registration for this username or email is already pending verification'}), 409
+    if RegistrationCache.get_pending(email):
+        return jsonify({'error': 'A registration for this email is already pending verification'}), 409
 
     hashed_pw = generate_password_hash(password)
     
     otp = str(secrets.randbelow(1000000)).zfill(6)
-    PENDING_REGISTRATIONS[email] = {
+    pending_data = {
         'first_name': first_name,
         'last_name': last_name,
         'username': username,
@@ -56,9 +51,12 @@ def register():
         'otp': otp
     }
     
+    if not RegistrationCache.set_pending(email, pending_data):
+        return jsonify({'error': 'Internal cache error. Please try again.'}), 500
+    
     # Send actual OTP email
     if not send_otp_email(email, otp):
-        PENDING_REGISTRATIONS.pop(email, None)
+        RegistrationCache.delete_pending(email)
         return jsonify({'error': 'Unable to send OTP email. Please contact the administrator.'}), 500
 
     return jsonify({'message': 'OTP sent', 'email': email, 'require_otp': True}), 200
@@ -72,7 +70,7 @@ def verify_otp():
     if not email or not otp:
         return jsonify({'error': 'Email and OTP are required'}), 400
 
-    pending = PENDING_REGISTRATIONS.get(email)
+    pending = RegistrationCache.get_pending(email)
     if not pending:
         return jsonify({'error': 'No pending registration found for this email'}), 404
 
@@ -83,7 +81,7 @@ def verify_otp():
     if User.query.filter(
         (User.username == pending['username']) | (User.email == pending['email'])
     ).first():
-        del PENDING_REGISTRATIONS[email]
+        RegistrationCache.delete_pending(email)
         return jsonify({'error': 'User already exists'}), 400
 
     new_user = User( 
@@ -100,10 +98,10 @@ def verify_otp():
         db.session.commit()
     except Exception:
         db.session.rollback()
-        del PENDING_REGISTRATIONS[email]
+        RegistrationCache.delete_pending(email)
         return jsonify({'error': 'Failed to create user. Please try registering again.'}), 500
 
-    del PENDING_REGISTRATIONS[email]
+    RegistrationCache.delete_pending(email)
 
     return jsonify({'message': 'User registered successfully'}), 201
 
@@ -308,10 +306,6 @@ def get_student_notifications():
     if not student or student.role != 'Student' or not student.class_id:
         return jsonify({'notifications': []}), 200
 
-    if student_id not in SEEN_NOTIFICATIONS:
-        SEEN_NOTIFICATIONS[student_id] = {'announcements': set(), 'quizzes': set()}
-    
-    seen = SEEN_NOTIFICATIONS[student_id]
     notifications = []
 
     latest_announcement = None
@@ -320,14 +314,14 @@ def get_student_notifications():
             latest_announcement = a
             break
 
-    if latest_announcement and latest_announcement.id not in seen['announcements']:
+    if latest_announcement and not NotificationCache.is_seen(str(student_id), 'announcement', str(latest_announcement.id)):
         notifications.append({
             'id': latest_announcement.id,
             'type': 'announcement',
             'title': f"Announcement: {latest_announcement.title}",
             'message': latest_announcement.message,
         })
-        seen['announcements'].add(latest_announcement.id)
+        NotificationCache.mark_as_seen(str(student_id), 'announcement', str(latest_announcement.id))
 
     latest_quiz = None
     for q in Quiz.query.filter_by(class_id=student.class_id).order_by(Quiz.id.desc()).all():
@@ -335,14 +329,14 @@ def get_student_notifications():
             latest_quiz = q
             break
 
-    if latest_quiz and latest_quiz.id not in seen['quizzes']:
+    if latest_quiz and not NotificationCache.is_seen(str(student_id), 'quiz', str(latest_quiz.id)):
         notifications.append({
             'id': latest_quiz.id,
             'type': 'quiz',
             'title': "New Quiz Published",
             'message': f"{latest_quiz.title} is now available!",
         })
-        seen['quizzes'].add(latest_quiz.id)
+        NotificationCache.mark_as_seen(str(student_id), 'quiz', str(latest_quiz.id))
 
     return jsonify({'notifications': notifications}), 200
 
