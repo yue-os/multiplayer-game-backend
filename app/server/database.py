@@ -1,9 +1,11 @@
 import os
 import uuid
+from urllib.parse import urlparse, urlunparse
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.exc import OperationalError
 from sqlalchemy import inspect, text
+from sqlalchemy.pool import NullPool
 
 class Base(DeclarativeBase):
     pass
@@ -223,8 +225,42 @@ def init_db(app):
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql://", 1)
 
+    # Connection pool tuning
+    engine_options = {
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+    }
+
+    try:
+        parsed = urlparse(database_url)
+        is_supabase_pooler = parsed.hostname and "pooler.supabase.com" in parsed.hostname
+        
+        if is_supabase_pooler:
+            # Supabase Pooler: Port 5432 is Session Mode (low limits), Port 6543 is Transaction Mode (high limits)
+            # Transaction mode is much better for web apps with multiple workers.
+            if parsed.port == 5432 or parsed.port is None:
+                if parsed.port:
+                    netloc = parsed.netloc.replace(f":{parsed.port}", ":6543")
+                else:
+                    netloc = f"{parsed.netloc}:6543"
+                parsed = parsed._replace(netloc=netloc)
+                database_url = urlunparse(parsed)
+            
+            # Use NullPool for Supabase Pooler as recommended to let the server-side pooler handle multiplexing
+            engine_options["poolclass"] = NullPool
+        else:
+            # Conservative pooling for non-Supabase/local DB to stay within typical connection limits
+            engine_options["pool_size"] = 2
+            engine_options["max_overflow"] = 0
+            
+    except Exception as e:
+        print(f"Warning: Could not parse DATABASE_URL for tuning: {e}")
+        engine_options["pool_size"] = 2
+        engine_options["max_overflow"] = 0
+
     app.config['SQLALCHEMY_DATABASE_URI'] = database_url
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = engine_options
     
     db.init_app(app)
     
@@ -251,7 +287,10 @@ def init_db(app):
                 seed_database()
             except Exception as e:
                 print(f"Error seeding database: {e}")
+            
+            # Ensure session is closed after startup operations
+            db.session.remove()
         except OperationalError as e:
             raise RuntimeError(
-                "Database authentication failed. Check DATABASE_URL credentials."
+                f"Database connection failed: {str(e)}. Check DATABASE_URL and connection limits."
             ) from e
