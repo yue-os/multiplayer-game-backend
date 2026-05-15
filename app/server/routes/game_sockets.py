@@ -17,6 +17,8 @@ from app.server.models.game_models import (
     VisibleRole,
 )
 from app.server.services.game_logic import GameEngine
+from app.cache.game_state_cache import GameStateCache
+from app.cache.redis_client import get_redis
 
 
 class SocketEnvelope(BaseModel):
@@ -36,6 +38,7 @@ class LobbyRuntime(BaseModel):
     game_state: GameState
     engine: GameEngine
     timer_task: asyncio.Task[None] | None = None
+    subscription_task: asyncio.Task[None] | None = None
     round_started_at: float = Field(default_factory=time.monotonic)
     round_duration_seconds: float = 60.0
 
@@ -57,7 +60,13 @@ class LobbySocketHub:
 
         lobby_runtime = self._lobbies.get(lobby_id)
         if lobby_runtime is None:
-            game_state = GameState(lobby_id=lobby_id, current_event=LocationEvent.SCHOOL, lockdown_meter=0)
+            # Try to load existing state from Redis
+            cached_state = GameStateCache.load_state(lobby_id)
+            if cached_state:
+                game_state = GameState.model_validate(cached_state)
+            else:
+                game_state = GameState(lobby_id=lobby_id, current_event=LocationEvent.SCHOOL, lockdown_meter=0)
+            
             lobby_runtime = LobbyRuntime(game_state=game_state, engine=GameEngine(game_state))
             self._lobbies[lobby_id] = lobby_runtime
 
@@ -92,6 +101,16 @@ class LobbySocketHub:
                     patient_zero = non_doctor_players[0]  # First non-doctor becomes patient zero
                     patient_zero.is_carrier = True
                     print(f"[Relay] Assigned {patient_zero.player_id} ({patient_zero.visible_role}) as patient zero")
+
+        # Save state to Redis and publish update
+        GameStateCache.save_state(lobby_id, lobby_runtime.game_state.model_dump())
+        redis_client = get_redis()
+        if redis_client:
+            await redis_client.publish(f"lobby:{lobby_id}:events", "update")
+
+        # Start synchronization listener if not already running
+        if lobby_runtime.subscription_task is None or lobby_runtime.subscription_task.done():
+            lobby_runtime.subscription_task = asyncio.create_task(self._listen_for_updates(lobby_id))
 
         if lobby_runtime.timer_task is None or lobby_runtime.timer_task.done():
             lobby_runtime.timer_task = asyncio.create_task(self.start_event_timer(lobby_id))
