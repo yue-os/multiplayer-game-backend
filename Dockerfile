@@ -23,4 +23,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import redis; redis.from_url('${REDIS_URL}').ping()" || exit 1
 
 # Run application
-CMD ["gunicorn", "--workers", "4", "--worker-class", "gevent", "--bind", "0.0.0.0:8000", "app.server.app:app"]
+CMD ["sh", "-c", "gunicorn --workers 4 --worker-class gevent --bind 0.0.0.0:${PORT:-8000} app.server.app:app"]

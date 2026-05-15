@@ -236,22 +236,16 @@ def init_db(app):
         is_supabase_pooler = parsed.hostname and "pooler.supabase.com" in parsed.hostname
         
         if is_supabase_pooler:
-            # Supabase Pooler: Port 5432 is Session Mode (low limits), Port 6543 is Transaction Mode (high limits)
-            # Transaction mode is much better for web apps with multiple workers.
-            if parsed.port == 5432 or parsed.port is None:
-                if parsed.port:
-                    netloc = parsed.netloc.replace(f":{parsed.port}", ":6543")
-                else:
-                    netloc = f"{parsed.netloc}:6543"
-                parsed = parsed._replace(netloc=netloc)
-                database_url = urlunparse(parsed)
-            
-            # Use NullPool for Supabase Pooler as recommended to let the server-side pooler handle multiplexing
+            # For Supabase Pooler (both Session and Transaction modes), NullPool is often safest 
+            # to avoid exhausting the server-side pooler's session limits from multiple workers.
+            # We don't auto-swap ports here to avoid SNI/tenant identifier issues.
             engine_options["poolclass"] = NullPool
+            print(f"DEBUG: Detected Supabase Pooler. Using NullPool for {parsed.hostname}")
         else:
-            # Conservative pooling for non-Supabase/local DB to stay within typical connection limits
+            # Conservative pooling for local or direct DB connections
             engine_options["pool_size"] = 2
             engine_options["max_overflow"] = 0
+            print(f"DEBUG: Using standard pooling (size=2) for {parsed.hostname or 'local'}")
             
     except Exception as e:
         print(f"Warning: Could not parse DATABASE_URL for tuning: {e}")
