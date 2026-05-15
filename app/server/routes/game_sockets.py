@@ -189,6 +189,13 @@ class LobbySocketHub:
         )
 
     async def broadcast_game_state(self, lobby_id: str, game_over: bool = False, scores: list[dict] | None = None) -> None:
+        # Reload state from Redis to ensure we are authoritative
+        cached_state = GameStateCache.load_state(lobby_id)
+        if cached_state:
+            runtime_obj = self._lobbies.get(lobby_id)
+            if runtime_obj:
+                runtime_obj.game_state = GameState.model_validate(cached_state)
+        
         runtime = self._get_lobby_runtime_or_raise(lobby_id)
         lobby_connections = self._connections.get(lobby_id, {})
         if not lobby_connections:
@@ -286,6 +293,31 @@ class LobbySocketHub:
                 traceback.print_exc()
                 self._cleanup_lobby(lobby_id)
                 return
+
+    async def _listen_for_updates(self, lobby_id: str) -> None:
+        redis_client = get_redis()
+        if not redis_client:
+            return
+
+        pubsub = redis_client.pubsub()
+        channel = f"lobby:{lobby_id}:events"
+        await pubsub.subscribe(channel)
+        
+        try:
+            while True:
+                # Use a small timeout to allow checking for cancellation
+                message = await pubsub.get_message(ignore_subscribe_metadata=True, timeout=1.0)
+                if message:
+                    # State updated on another worker, reload and broadcast
+                    await self.broadcast_game_state(lobby_id)
+                await asyncio.sleep(0.1) # Yield control
+        except asyncio.CancelledError:
+            await pubsub.unsubscribe(channel)
+            raise
+        except Exception as e:
+            print(f"[Sync] Error in listener for {lobby_id}: {e}")
+        finally:
+            await pubsub.close()
 
     def _cleanup_lobby(self, lobby_id: str) -> None:
         runtime = self._lobbies.pop(lobby_id, None)
