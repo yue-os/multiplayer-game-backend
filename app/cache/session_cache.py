@@ -74,3 +74,52 @@ class SessionCache:
         except Exception as e:
             print(f"Error extending session: {e}")
             return False
+
+
+class RegistrationCache:
+    """Cache for pending registrations (OTPs)"""
+    
+    @staticmethod
+    def set_pending(email: str, data: dict, expiry: int = 600):
+        """Store pending registration data in Redis"""
+        redis = get_redis()
+        if not redis:
+            return False
+        
+        try:
+            key = f"registration:otp:{email.lower()}"
+            redis.setex(key, expiry, json.dumps(data))
+            return True
+        except Exception as e:
+            print(f"Error setting pending registration: {e}")
+            return False
+
+    @staticmethod
+    def get_pending(email: str) -> dict:
+        """Retrieve pending registration data from Redis"""
+        redis = get_redis()
+        if not redis:
+            return None
+        
+        try:
+            key = f"registration:otp:{email.lower()}"
+            data = redis.get(key)
+            return json.loads(data) if data else None
+        except Exception as e:
+            print(f"Error getting pending registration: {e}")
+            return None
+
+    @staticmethod
+    def delete_pending(email: str):
+        """Remove pending registration data from Redis"""
+        redis = get_redis()
+        if not redis:
+            return False
+        
+        try:
+            key = f"registration:otp:{email.lower()}"
+            redis.delete(key)
+            return True
+        except Exception as e:
+            print(f"Error deleting pending registration: {e}")
+            return False
