@@ -5,7 +5,7 @@ from typing import Mapping
 
 from fastapi import HTTPException, status
 
-from app.server.models.game_models import GameState, HealthStatus, ItemType, LocationEvent, PlayerState
+from app.server.models.game_models import GameState, HealthStatus, ItemType, LocationEvent, PlayerState, VisibleRole
 
 
 class GameEngine:

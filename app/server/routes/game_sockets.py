@@ -18,7 +18,7 @@ from app.server.models.game_models import (
 )
 from app.server.services.game_logic import GameEngine
 from app.cache.game_state_cache import GameStateCache
-from app.cache.redis_client import get_redis
+from app.cache.redis_client import get_async_redis
 
 
 class SocketEnvelope(BaseModel):
@@ -104,7 +104,7 @@ class LobbySocketHub:
 
         # Save state to Redis and publish update
         GameStateCache.save_state(lobby_id, lobby_runtime.game_state.model_dump())
-        redis_client = get_redis()
+        redis_client = get_async_redis()
         if redis_client:
             await redis_client.publish(f"lobby:{lobby_id}:events", "update")
 
@@ -130,6 +130,13 @@ class LobbySocketHub:
             self._cleanup_lobby(lobby_id)
 
     async def handle_trade(self, lobby_id: str, player_id: str, payload: dict[str, Any]) -> None:
+        # Reload state from Redis first to ensure we have any players who joined via other workers
+        cached_state = GameStateCache.load_state(lobby_id)
+        if cached_state:
+            runtime_obj = self._lobbies.get(lobby_id)
+            if runtime_obj:
+                runtime_obj.game_state = GameState.model_validate(cached_state)
+        
         runtime = self._get_lobby_runtime_or_raise(lobby_id)
 
         try:
@@ -166,7 +173,7 @@ class LobbySocketHub:
 
         # Save state to Redis and publish update
         GameStateCache.save_state(lobby_id, runtime.game_state.model_dump())
-        redis_client = get_redis()
+        redis_client = get_async_redis()
         if redis_client:
             await redis_client.publish(f"lobby:{lobby_id}:events", "update")
 
@@ -267,7 +274,7 @@ class LobbySocketHub:
 
                 # Save state to Redis and publish update after round rotation
                 GameStateCache.save_state(lobby_id, runtime.game_state.model_dump())
-                redis_client = get_redis()
+                redis_client = get_async_redis()
                 if redis_client:
                     await redis_client.publish(f"lobby:{lobby_id}:events", "update")
 
@@ -307,7 +314,7 @@ class LobbySocketHub:
                 return
 
     async def _listen_for_updates(self, lobby_id: str) -> None:
-        redis_client = get_redis()
+        redis_client = get_async_redis()
         if not redis_client:
             return
 
@@ -318,7 +325,7 @@ class LobbySocketHub:
         try:
             while True:
                 # Use a small timeout to allow checking for cancellation
-                message = await pubsub.get_message(ignore_subscribe_metadata=True, timeout=1.0)
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
                 if message:
                     # State updated on another worker, reload and broadcast
                     await self.broadcast_game_state(lobby_id)
@@ -329,7 +336,7 @@ class LobbySocketHub:
         except Exception as e:
             print(f"[Sync] Error in listener for {lobby_id}: {e}")
         finally:
-            await pubsub.close()
+            await pubsub.aclose()
 
     def _cleanup_lobby(self, lobby_id: str) -> None:
         runtime = self._lobbies.pop(lobby_id, None)
@@ -377,10 +384,8 @@ class LobbySocketHub:
         lobby_connections = self._connections.get(lobby_id, {})
         websocket = lobby_connections.get(player_id)
         if websocket is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Player '{player_id}' is not currently connected.",
-            )
+            # In multi-worker setup, player might be on another worker
+            return
         await websocket.send_json(message)
 
     async def _broadcast_to_lobby(self, lobby_id: str, message: dict[str, Any]) -> None:

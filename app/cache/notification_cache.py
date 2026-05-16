@@ -31,7 +31,7 @@ class NotificationCache:
         try:
             key = f"seen_notifications:{user_id}"
             value = f"{notification_type}:{target_id}"
-            return redis.sismember(key, value)
+            return bool(redis.sismember(key, value))
         except Exception as e:
             print(f"Error checking if notification is seen: {e}")
             return False

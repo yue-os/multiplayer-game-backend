@@ -134,3 +134,31 @@ class GameStateCache:
         except Exception as e:
             print(f"Error getting lobby players: {e}")
             return []
+
+    @staticmethod
+    def save_state(lobby_id: str, state_dict: dict, expiry: int = 3600):
+        """Save full game state to Redis"""
+        redis = get_redis()
+        if not redis:
+            return False
+        try:
+            key = f"lobby:{lobby_id}:state"
+            redis.setex(key, expiry, json.dumps(state_dict))
+            return True
+        except Exception as e:
+            print(f"Error saving game state: {e}")
+            return False
+
+    @staticmethod
+    def load_state(lobby_id: str) -> Optional[dict]:
+        """Load full game state from Redis"""
+        redis = get_redis()
+        if not redis:
+            return None
+        try:
+            key = f"lobby:{lobby_id}:state"
+            data = redis.get(key)
+            return json.loads(data) if data else None
+        except Exception as e:
+            print(f"Error loading game state: {e}")
+            return None
