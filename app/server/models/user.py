@@ -144,6 +144,19 @@ class PasswordResetRequest(db.Model, TimestampMixin, PublicIdMixin):
     user = db.relationship('User', foreign_keys=[user_id], backref='password_reset_requests')
     approved_by = db.relationship('User', foreign_keys=[approved_by_id])
 
+
+class PendingRegistration(db.Model, TimestampMixin):
+    __tablename__ = 'pending_registrations'
+
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    data = db.Column(db.JSON, nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+
 class Message(db.Model, TimestampMixin, PublicIdMixin):
     __tablename__ = 'messages'
 
