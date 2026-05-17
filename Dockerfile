@@ -24,4 +24,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.getenv(\"PORT\", \"8000\")}/health', timeout=5).read()" || exit 1
 
 # Run application
-CMD ["sh", "-c", "gunicorn --workers 4 --worker-class gevent --bind 0.0.0.0:${PORT:-8000} app.server.app:app"]
+CMD ["sh", "-c", "gunicorn --workers 4 --worker-class gevent --access-logfile - --bind 0.0.0.0:${PORT:-8000} app.server.app:app"]
+

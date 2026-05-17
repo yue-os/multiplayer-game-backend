@@ -2,6 +2,7 @@ from app.server.database import db
 from app.server.models.appModel import PublicIdMixin, TimestampMixin
 from datetime import datetime
 import time
+import base64
 
 # --- User & Relationships ---
 
@@ -16,6 +17,7 @@ class User(db.Model, TimestampMixin, PublicIdMixin):
     password_hash = db.Column(db.String(255), nullable=False)
     must_change_password = db.Column(db.Boolean, nullable=False, default=False)
     role = db.Column(db.String(20), nullable=False) # Admin, Teacher, Parent, Student
+    profile_pic = db.Column(db.LargeBinary, nullable=True) # Stores base64-encoded profile picture
     
     # Relationship: Parent -> Student (One Parent can have many Students/Children)
     parent_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
@@ -28,6 +30,9 @@ class User(db.Model, TimestampMixin, PublicIdMixin):
         super().__init__(**kwargs)
 
     def to_dict(self):
+        profile_pic_b64 = None
+        if self.profile_pic:
+            profile_pic_b64 = base64.b64encode(self.profile_pic).decode('utf-8')
         return {
             "id": self.id,
             "public_id": self.public_id,
@@ -38,7 +43,8 @@ class User(db.Model, TimestampMixin, PublicIdMixin):
             "must_change_password": self.must_change_password,
             "role": self.role,
             "parent_id": self.parent_id,
-            "class_id": self.class_id
+            "class_id": self.class_id,
+            "profile_pic": profile_pic_b64
         }
 
 class Class(db.Model, TimestampMixin, PublicIdMixin):

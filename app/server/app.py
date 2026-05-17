@@ -1,3 +1,11 @@
+import os
+import re
+from typing import Optional
+from dotenv import load_dotenv
+import logging
+
+load_dotenv()
+
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
@@ -8,13 +16,6 @@ from app.server.routes.teacher import teacher_bp
 from app.server.routes.parent import parent_bp
 from app.server.routes.docs import docs_bp
 from app.server.routes.admin_users_flask import admin_users_bp
-import os
-import re
-from typing import Optional
-from dotenv import load_dotenv
-import logging
-
-load_dotenv()
 
 LAN_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?"
 LAN_ORIGIN_PATTERN = re.compile(f"^{LAN_ORIGIN_REGEX}$")
@@ -22,6 +23,26 @@ VERCEL_PREVIEW_PATTERN = re.compile(r"^https://[a-zA-Z0-9-]+\.vercel\.app$")
 
 logger = logging.getLogger("http")
 logger.setLevel(logging.INFO)
+
+_udp_discovery_started = False
+
+
+def _maybe_start_udp_discovery() -> None:
+    global _udp_discovery_started
+    if _udp_discovery_started:
+        return
+
+    enabled = os.getenv("ENABLE_UDP_DISCOVERY", "false").strip().lower() in ("1", "true", "yes", "on")
+    if not enabled:
+        return
+
+    try:
+        from udp_discovery import start_background_discovery
+        start_background_discovery()
+        _udp_discovery_started = True
+        logger.info("UDP discovery responder started")
+    except Exception as exc:
+        logger.warning("UDP discovery responder failed to start: %s", exc)
 
 
 def _parse_csv_env(name: str) -> set[str]:
@@ -48,6 +69,7 @@ ALLOWED_ORIGINS = _load_allowed_origins()
 
 def create_app():
     app = Flask(__name__)
+    _maybe_start_udp_discovery()
     
     # Configuration
     app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
@@ -59,7 +81,7 @@ def create_app():
         app,
         resources={
             r"/*": {
-                "origins": list(ALLOWED_ORIGINS) + [LAN_ORIGIN_REGEX, r"https://[a-zA-Z0-9-]+\.vercel\.app"],
+                "origins": list(ALLOWED_ORIGINS) + [LAN_ORIGIN_PATTERN, VERCEL_PREVIEW_PATTERN],
             }
         },
         supports_credentials=True,

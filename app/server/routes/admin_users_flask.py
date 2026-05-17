@@ -5,9 +5,7 @@ import re
 import secrets
 import hashlib
 import os
-import subprocess
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from flask import Blueprint, jsonify, request
 from sqlalchemy import case, func
@@ -18,6 +16,8 @@ from app.auth.auth_bearer import token_required
 from app.server.database import db
 from app.server.models.announcement import Announcement
 from app.server.models.user import Class, GameServer, Message, MissionProgress, PasswordResetRequest, PlaytimeLog, Quiz, QuizResult, User
+from app.server.services.email_service import send_password_reset_email
+from app.server.utils import get_configured_base_url
 
 
 admin_users_bp = Blueprint("admin_users", __name__)
@@ -142,25 +142,13 @@ def _serialize_password_reset_request(item: PasswordResetRequest) -> dict[str, o
 
 
 def _reset_link(token: str) -> str:
-    base_url = (
-        os.getenv("PASSWORD_RESET_BASE_URL")
-        or os.getenv("FRONTEND_BASE_URL")
-        or os.getenv("RESET_LINK_BASE_URL")
-        or "http://localhost:5173"
-    ).rstrip("/")
+    base_url = get_configured_base_url("PASSWORD_RESET_BASE_URL", default_port=5173)
     return f"{base_url}/reset-password?token={token}"
 
 
 def _send_reset_email(email: str, reset_link: str) -> None:
-    script_path = Path(__file__).resolve().parents[3] / "scripts" / "send_password_reset_email.mjs"
-    subprocess.run(
-        ["node", str(script_path), email, reset_link],
-        check=True,
-        capture_output=True,
-        text=True,
-        env=os.environ.copy(),
-        timeout=30,
-    )
+    if not send_password_reset_email(email, reset_link):
+        raise RuntimeError("SMTP password reset email failed")
 
 
 def _split_name(full_name: str) -> tuple[str, str]:
@@ -240,9 +228,8 @@ def review_password_reset_request(request_id: int):
     try:
         _send_reset_email(reset_request.email, reset_link)
         email_sent = True
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        detail = getattr(exc, "stderr", "") or str(exc)
-        print(f"Failed to send reset email: {detail}")
+    except Exception as exc:
+        print(f"Failed to send reset email: {exc}")
 
     if email_sent:
         reset_request.email_sent_at = datetime.utcnow()

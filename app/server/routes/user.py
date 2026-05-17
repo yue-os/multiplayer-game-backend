@@ -11,7 +11,7 @@ from app.server.models.announcement import Announcement
 from app.auth.auth_handler import signJWT
 from app.auth.auth_bearer import token_required
 
-from app.server.services.email_service import send_otp_email
+from app.server.services.email_service import send_otp_email, send_otp_email_async
 from app.cache.session_cache import RegistrationCache
 from app.cache.notification_cache import NotificationCache
 
@@ -54,12 +54,20 @@ def register():
     if not RegistrationCache.set_pending(email, pending_data):
         return jsonify({'error': 'Internal cache error. Please try again.'}), 500
     
-    # Send actual OTP email
-    if not send_otp_email(email, otp):
+    async_email = str(data.get('async_email', 'true')).lower() not in ('0', 'false', 'no')
+    email_queued = send_otp_email_async(email, otp) if async_email else send_otp_email(email, otp)
+    if not email_queued:
         RegistrationCache.delete_pending(email)
-        return jsonify({'error': 'Unable to send OTP email. Please contact the administrator.'}), 500
+        return jsonify({
+            'error': 'Unable to send verification email. Check SMTP settings and try again.',
+            'code': 'otp_email_failed'
+        }), 502
 
-    return jsonify({'message': 'OTP sent', 'email': email, 'require_otp': True}), 200
+    return jsonify({
+        'message': 'OTP email queued' if async_email else 'OTP sent',
+        'email': email,
+        'require_otp': True
+    }), 200
 
 @user_bp.route('/auth/verify-otp', methods=['POST'])
 def verify_otp():
@@ -171,8 +179,12 @@ def forgot_password():
     email = str(data.get('email') or '').strip().lower()
     role = str(data.get('role') or '').strip()
 
-    if not email or role not in RESET_ALLOWED_ROLES:
-        return jsonify({'error': 'Email and a valid role are required'}), 400
+    if not email:
+        return jsonify({'error': 'Email is required'}), 400
+
+    if role not in RESET_ALLOWED_ROLES:
+        matched_user = User.query.filter(func.lower(User.email) == email).first()
+        role = matched_user.role if matched_user and matched_user.role in RESET_ALLOWED_ROLES else 'Student'
 
     user = User.query.filter(func.lower(User.email) == email, User.role == role).first()
     reset_request = PasswordResetRequest(  # pyre-ignore[unexpected-keyword]
@@ -274,6 +286,7 @@ def update_own_profile():
     last_name = str(data.get('last_name', user.last_name)).strip()
     username = str(data.get('username', user.username)).strip()
     email = str(data.get('email', user.email)).strip()
+    profile_pic_b64 = data.get('profile_pic')
 
     if first_name == '' or last_name == '' or username == '' or email == '':
         return jsonify({'error': 'first_name, last_name, username, and email are required'}), 400
@@ -288,6 +301,15 @@ def update_own_profile():
     user.last_name = last_name
     user.username = username
     user.email = email
+    
+    # Handle base64 profile picture
+    if profile_pic_b64:
+        try:
+            import base64
+            # Decode base64 string to binary
+            user.profile_pic = base64.b64decode(profile_pic_b64)
+        except Exception as e:
+            return jsonify({'error': f'Invalid profile picture format: {str(e)}'}), 400
 
     db.session.commit()
     return jsonify({'message': 'Profile updated successfully', 'user': user.to_dict()}), 200
@@ -308,11 +330,12 @@ def get_student_notifications():
 
     notifications = []
 
-    latest_announcement = None
-    for a in Announcement.query.filter_by(class_id=student.class_id).order_by(Announcement.created_at.desc()).all():
-        if not getattr(a, 'is_hidden', False):
-            latest_announcement = a
-            break
+    latest_announcement = (
+        Announcement.query
+        .filter_by(class_id=student.class_id, is_hidden=False)
+        .order_by(Announcement.created_at.desc())
+        .first()
+    )
 
     if latest_announcement and not NotificationCache.is_seen(str(student_id), 'announcement', str(latest_announcement.id)):
         notifications.append({
@@ -670,8 +693,12 @@ def student_class_info():
     ]
     
     # All announcements for this class
-    all_announcements_raw = Announcement.query.filter_by(class_id=classroom.id).order_by(Announcement.created_at.desc()).all()
-    all_announcements = [a for a in all_announcements_raw if not getattr(a, 'is_hidden', False)]
+    all_announcements = (
+        Announcement.query
+        .filter_by(class_id=classroom.id, is_hidden=False)
+        .order_by(Announcement.created_at.desc())
+        .all()
+    )
 
     announcement_payload = [{
         'id': a.id,

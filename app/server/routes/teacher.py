@@ -961,8 +961,7 @@ def create_announcement():
     if not classroom:
         return jsonify({'error': 'Class not found or not owned by teacher'}), 403
 
-    announcement = Announcement(class_id=class_id, teacher_id=teacher_id, title=title, message=message)
-    setattr(announcement, 'is_hidden', False)
+    announcement = Announcement(class_id=class_id, teacher_id=teacher_id, title=title, message=message, is_hidden=False)
     db.session.add(announcement)
     db.session.commit()
 
@@ -981,13 +980,7 @@ def list_announcements():
     # Fetch all announcements for the teacher's classes
     announcements = Announcement.query.filter_by(teacher_id=teacher_id).order_by(Announcement.created_at.desc()).all()
 
-    payload = []
-    for a in announcements:
-        d = a.to_dict()
-        d['is_hidden'] = getattr(a, 'is_hidden', False)
-        payload.append(d)
-
-    return jsonify({'announcements': payload}), 200
+    return jsonify({'announcements': [a.to_dict() for a in announcements]}), 200
 
 
 @teacher_bp.route('/teacher/announcement/<int:announcement_id>', methods=['DELETE'])
@@ -1019,8 +1012,8 @@ def toggle_announcement_visibility(announcement_id: int):
     announcement = Announcement.query.filter_by(id=announcement_id, teacher_id=teacher_id).first()
     if not announcement:
         return jsonify({'error': 'Announcement not found or not owned by teacher'}), 404
-    current_hidden = getattr(announcement, 'is_hidden', False)
-    setattr(announcement, 'is_hidden', not current_hidden)
+    current_hidden = bool(announcement.is_hidden)
+    announcement.is_hidden = not current_hidden
     db.session.commit()
     return jsonify({'message': 'Visibility toggled', 'is_hidden': not current_hidden}), 200
 
@@ -1079,7 +1072,7 @@ def create_lobby():
         name=server_name,
         ip=ip,
         port=port,
-        player_count=0,
+        player_count=0,  # No players yet; teacher doesn't join the game
         required_players=required_players,
         last_heartbeat=time.time(),
         persistent=True,

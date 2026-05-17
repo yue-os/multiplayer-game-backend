@@ -61,6 +61,15 @@ def _ensure_user_name_columns(app, inspector):
     columns = {col['name'] for col in inspector.get_columns('users')}
     modified = False
 
+    if 'profile_pic' not in columns:
+        dialect = db.engine.dialect.name
+        if dialect == "postgresql":
+            db.session.execute(text("ALTER TABLE users ADD COLUMN profile_pic BYTEA"))
+        else:
+            db.session.execute(text("ALTER TABLE users ADD COLUMN profile_pic BLOB"))
+        modified = True
+        columns.add('profile_pic')
+
     if 'first_name' not in columns:
         db.session.execute(text("ALTER TABLE users ADD COLUMN first_name VARCHAR(80) DEFAULT ''"))
         modified = True
@@ -216,6 +225,26 @@ def _ensure_messages_columns(app, inspector):
     if modified:
         db.session.commit()
 
+
+def _ensure_announcement_columns(app, inspector):
+    if not inspector.has_table('announcements'):
+        return
+
+    columns = {col['name'] for col in inspector.get_columns('announcements')}
+
+    if 'is_hidden' not in columns:
+        dialect = db.engine.dialect.name
+        if dialect == "postgresql":
+            db.session.execute(text("ALTER TABLE announcements ADD COLUMN IF NOT EXISTS is_hidden BOOLEAN DEFAULT FALSE"))
+        else:
+            db.session.execute(text("ALTER TABLE announcements ADD COLUMN is_hidden BOOLEAN DEFAULT FALSE"))
+        db.session.commit()
+        columns.add('is_hidden')
+
+    if 'is_hidden' in columns:
+        db.session.execute(text("UPDATE announcements SET is_hidden = FALSE WHERE is_hidden IS NULL"))
+        db.session.commit()
+
 def init_db(app):
     database_url = os.getenv('DATABASE_URL')
     if not database_url:
@@ -272,6 +301,7 @@ def init_db(app):
             _ensure_user_name_columns(app, inspector)
             _ensure_game_server_columns(app, inspector)
             _ensure_quiz_columns(app, inspector)
+            _ensure_announcement_columns(app, inspector)
             _ensure_messages_columns(app, inspector)
             _ensure_public_ids(app, inspector)
 
