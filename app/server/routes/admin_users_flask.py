@@ -16,7 +16,7 @@ from app.auth.auth_bearer import token_required
 from app.server.database import db
 from app.server.models.announcement import Announcement
 from app.server.models.user import Class, GameServer, Message, MissionProgress, PasswordResetRequest, PlaytimeLog, Quiz, QuizResult, User
-from app.server.services.email_service import send_password_reset_email
+from app.server.services.email_service import send_password_reset_email_async
 from app.server.utils import get_configured_base_url
 
 
