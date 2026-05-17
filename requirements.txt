@@ -15,3 +15,5 @@ gevent
 gevent-websocket
 asgiref
 redis
+requests
+
