@@ -314,6 +314,7 @@ def register_server():
     name = data.get("name", "Unknown Server")
     count = data.get("count", 0)
     required_players = data.get("required_players", 2)
+    lobby_id = str(data.get("lobby_id", "")).strip()
 
     try:
         count = max(0, int(count))
@@ -327,6 +328,30 @@ def register_server():
 
     if advertised_ip == "":
         advertised_ip = client_ip
+
+    if lobby_id:
+        server = GameServer.query.filter_by(public_id=lobby_id).first()
+        if server:
+            # Clean up any stale server claiming this IP and port to prevent UniqueViolation
+            conflict = GameServer.query.filter_by(ip=advertised_ip, port=port).first()
+            if conflict and conflict.id != server.id:
+                if not conflict.persistent:
+                    db.session.delete(conflict)
+                    db.session.flush()
+                    server.ip = advertised_ip
+                    server.port = port
+            else:
+                server.ip = advertised_ip
+                server.port = port
+            server.name = name
+            server.player_count = count
+            server.required_players = required_players
+            server.last_heartbeat = time.time()
+            try:
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+            return "OK", 200
 
     # Check if server exists
     server = GameServer.query.filter_by(ip=advertised_ip, port=port).first()
@@ -347,7 +372,10 @@ def register_server():
         )
         db.session.add(server)
     
-    db.session.commit()
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
     return "OK", 200
 
 @app_bp.route('/server/list', methods=['GET'])
@@ -397,7 +425,8 @@ def list_servers():
             "current_players": current_players,
             "required_players": required_players,
             "started": is_started,
-            "status": status
+            "status": status,
+            "lobby_id": s.public_id
         })
 
     # Also include any in-memory websocket relay lobbies from socket_hub.
