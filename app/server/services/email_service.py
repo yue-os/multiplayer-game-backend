@@ -91,30 +91,29 @@ def _send_smtp_message(to_email: str, msg: MIMEMultipart) -> bool:
     smtp_email = os.getenv('SMTP_EMAIL')
     smtp_password = os.getenv('SMTP_PASSWORD')
     smtp_from = os.getenv('SMTP_FROM', smtp_email)
-    smtp_host = os.getenv('SMTP_HOST', 'smtp.gmail.com')
-    smtp_port = int(os.getenv('SMTP_PORT', '587'))
-    smtp_timeout = float(os.getenv('SMTP_TIMEOUT', '10'))
+    smtp_host = os.getenv('SMTP_HOST', 'smtp.resend.com')
+    smtp_port = int(os.getenv('SMTP_PORT', '465')) # Defaulting to 465 for better cloud compatibility
+    smtp_timeout = float(os.getenv('SMTP_TIMEOUT', '30')) # Increased timeout
 
     if not smtp_email or not smtp_password:
         print("ERROR: SMTP_EMAIL or SMTP_PASSWORD not set in environment.")
         return False
 
     try:
+        # Port 465 uses SMTP_SSL (Implicit TLS)
         if smtp_port == 465:
             with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=smtp_timeout) as server:
                 server.login(smtp_email, smtp_password)
                 server.sendmail(smtp_from, to_email, msg.as_string())
+        # Port 587 or 25 uses STARTTLS (Explicit TLS)
         else:
-            server = smtplib.SMTP(smtp_host, smtp_port, timeout=smtp_timeout)
-            try:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=smtp_timeout) as server:
                 server.ehlo()
                 if server.has_extn('STARTTLS'):
                     server.starttls()
                     server.ehlo()
                 server.login(smtp_email, smtp_password)
                 server.sendmail(smtp_from, to_email, msg.as_string())
-            finally:
-                server.quit()
         return True
     except Exception as e:
         print(
