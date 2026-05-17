@@ -147,8 +147,8 @@ def _reset_link(token: str) -> str:
 
 
 def _send_reset_email(email: str, reset_link: str) -> None:
-    if not send_password_reset_email(email, reset_link):
-        raise RuntimeError("SMTP password reset email failed")
+    if not send_password_reset_email_async(email, reset_link):
+        raise RuntimeError("Failed to queue password reset email")
 
 
 def _split_name(full_name: str) -> tuple[str, str]:

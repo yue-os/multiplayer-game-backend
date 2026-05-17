@@ -144,16 +144,37 @@ def send_otp_email(to_email: str, otp: str):
 
 def send_password_reset_email(to_email: str, reset_link: str):
     smtp_email = os.getenv('SMTP_EMAIL')
+    smtp_password = os.getenv('SMTP_PASSWORD')
     smtp_from = os.getenv('SMTP_FROM', smtp_email)
-    if not smtp_email:
-        print("ERROR: SMTP_EMAIL not set in environment.")
+    smtp_host = os.getenv('SMTP_HOST', 'smtp.gmail.com')
+    smtp_port = os.getenv('SMTP_PORT', '587')
+    
+    print(f"[DEBUG] Attempting password reset email to {to_email}")
+    print(f"[DEBUG] Host: {smtp_host}:{smtp_port}, From: {smtp_from}, User: {smtp_email}")
+
+    if not smtp_email or not smtp_password:
+        print("ERROR: SMTP_EMAIL or SMTP_PASSWORD not set in environment.")
         return False
+        
+    if smtp_from == smtp_email and smtp_email == 'resend':
+        print("WARNING: SMTP_FROM is not set while using Resend. This will likely fail.")
 
     msg = _build_password_reset_message(to_email, reset_link, smtp_from)
     if _send_smtp_message(to_email, msg):
         print(f"Password reset email sent successfully to {to_email}")
         return True
     return False
+
+def send_password_reset_email_async(to_email: str, reset_link: str):
+    """
+    Fire-and-forget password reset email.
+    """
+    def _send():
+        send_password_reset_email(to_email, reset_link)
+
+    thread = threading.Thread(target=_send, name=f"reset-email-{to_email}", daemon=True)
+    thread.start()
+    return True
 
 def send_otp_email_async(to_email: str, otp: str):
     """
