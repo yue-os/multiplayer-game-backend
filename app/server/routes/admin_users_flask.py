@@ -28,17 +28,21 @@ CSV_ALLOWED_ROLES = {"Teacher", "Parent", "Student"}
 PASSWORD_RESET_STATUSES = {"Approved", "Rejected"}
 
 
-def _serialize_user(user: User) -> dict[str, object]:
-    classroom = Class.query.get(user.class_id) if user.class_id is not None else None
+def _serialize_user(user: User, class_map: dict = None, teacher_classes_map: dict = None) -> dict[str, object]:
+    if class_map is not None:
+        classroom = class_map.get(user.class_id)
+    else:
+        classroom = Class.query.get(user.class_id) if user.class_id is not None else None
+
     teacher_classes = []
     if user.role == "Teacher":
+        if teacher_classes_map is not None:
+            classes = teacher_classes_map.get(user.id, [])
+        else:
+            classes = Class.query.filter_by(teacher_id=user.id).order_by(Class.name.asc()).all()
+            
         teacher_classes = [
-            {
-                "id": classroom.id,
-                "public_id": classroom.public_id,
-                "name": classroom.name,
-            }
-            for classroom in Class.query.filter_by(teacher_id=user.id).order_by(Class.name.asc()).all()
+            {"id": c.id, "public_id": c.public_id, "name": c.name} for c in classes
         ]
 
     return {
@@ -58,9 +62,17 @@ def _serialize_user(user: User) -> dict[str, object]:
     }
 
 
-def _serialize_class(classroom: Class) -> dict[str, object]:
-    teacher = User.query.get(classroom.teacher_id)
-    students = User.query.filter_by(class_id=classroom.id, role="Student").order_by(User.id.asc()).all()
+def _serialize_class(classroom: Class, teacher_map: dict = None, student_map: dict = None) -> dict[str, object]:
+    if teacher_map is not None:
+        teacher = teacher_map.get(classroom.teacher_id)
+    else:
+        teacher = User.query.get(classroom.teacher_id)
+        
+    if student_map is not None:
+        students = student_map.get(classroom.id, [])
+    else:
+        students = User.query.filter_by(class_id=classroom.id, role="Student").order_by(User.id.asc()).all()
+        
     return {
         "id": classroom.id,
         "public_id": classroom.public_id,
@@ -116,9 +128,14 @@ def _valid_email(value: str) -> bool:
     return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", value))
 
 
-def _serialize_password_reset_request(item: PasswordResetRequest) -> dict[str, object]:
-    user = User.query.get(item.user_id) if item.user_id else None
-    approver = User.query.get(item.approved_by_id) if item.approved_by_id else None
+def _serialize_password_reset_request(item: PasswordResetRequest, user_map: dict = None) -> dict[str, object]:
+    if user_map is not None:
+        user = user_map.get(item.user_id) if item.user_id else None
+        approver = user_map.get(item.approved_by_id) if item.approved_by_id else None
+    else:
+        user = User.query.get(item.user_id) if item.user_id else None
+        approver = User.query.get(item.approved_by_id) if item.approved_by_id else None
+        
     return {
         "id": item.id,
         "public_id": item.public_id,
@@ -171,7 +188,17 @@ def list_password_reset_requests():
         .order_by(PasswordResetRequest.created_at.desc(), PasswordResetRequest.id.desc())
         .all()
     )
-    return jsonify({"requests": [_serialize_password_reset_request(item) for item in requests]}), 200
+    
+    user_ids = set()
+    for r in requests:
+        if r.user_id: user_ids.add(r.user_id)
+        if r.approved_by_id: user_ids.add(r.approved_by_id)
+        
+    user_map = {}
+    if user_ids:
+        user_map = {u.id: u for u in User.query.filter(User.id.in_(user_ids)).all()}
+
+    return jsonify({"requests": [_serialize_password_reset_request(item, user_map) for item in requests]}), 200
 
 
 @admin_users_bp.route("/api/admin/password-reset-requests/<int:request_id>", methods=["PATCH"])
@@ -300,7 +327,17 @@ def get_classes():
         return jsonify({"error": "Unauthorized"}), 403
 
     classes = Class.query.order_by(Class.name.asc()).all()
-    return jsonify([_serialize_class(classroom) for classroom in classes]), 200
+    
+    teacher_map = {t.id: t for t in User.query.filter_by(role="Teacher").all()}
+    
+    student_map = {}
+    for s in User.query.filter_by(role="Student").filter(User.class_id.isnot(None)).all():
+        student_map.setdefault(s.class_id, []).append(s)
+        
+    for c_id in student_map:
+        student_map[c_id].sort(key=lambda x: x.id)
+
+    return jsonify([_serialize_class(classroom, teacher_map, student_map) for classroom in classes]), 200
 
 
 @admin_users_bp.route("/api/admin/classes", methods=["POST"])
@@ -335,15 +372,12 @@ def create_class():
     db.session.flush()
 
     assigned_students = []
-    for student_id in student_ids:
-        try:
-            student = User.query.get(int(student_id))
-        except (TypeError, ValueError):
-            continue
-        if student is None or student.role != "Student":
-            continue
-        student.class_id = classroom.id
-        assigned_students.append(student.id)
+    if student_ids:
+        valid_ids = [int(sid) for sid in student_ids if str(sid).isdigit()]
+        if valid_ids:
+            for student in User.query.filter(User.id.in_(valid_ids), User.role == "Student").all():
+                student.class_id = classroom.id
+                assigned_students.append(student.id)
 
     db.session.commit()
 
@@ -604,7 +638,17 @@ def list_users():
         return jsonify({"error": "Unauthorized"}), 403
 
     users = User.query.order_by(User.id.asc()).all()
-    return jsonify([_serialize_user(user) for user in users]), 200
+    
+    classes = Class.query.all()
+    class_map = {c.id: c for c in classes}
+    teacher_classes_map = {}
+    for c in classes:
+        if c.teacher_id:
+            teacher_classes_map.setdefault(c.teacher_id, []).append(c)
+    for t_id in teacher_classes_map:
+        teacher_classes_map[t_id].sort(key=lambda x: x.name)
+        
+    return jsonify([_serialize_user(user, class_map, teacher_classes_map) for user in users]), 200
 
 
 @admin_users_bp.route("/api/admin/users/<int:user_id>", methods=["DELETE"])
@@ -726,11 +770,27 @@ def get_class_assignment_options():
     teachers = User.query.filter_by(role="Teacher").order_by(User.username.asc()).all()
     classes = Class.query.order_by(Class.name.asc()).all()
 
+    class_map = {c.id: c for c in classes}
+    teacher_classes_map = {}
+    for c in classes:
+        if c.teacher_id:
+            teacher_classes_map.setdefault(c.teacher_id, []).append(c)
+    for t_id in teacher_classes_map:
+        teacher_classes_map[t_id].sort(key=lambda x: x.name)
+
+    teacher_map = {t.id: t for t in teachers}
+    student_map = {}
+    for s in students:
+        if s.class_id:
+            student_map.setdefault(s.class_id, []).append(s)
+    for c_id in student_map:
+        student_map[c_id].sort(key=lambda x: x.id)
+
     return jsonify(
         {
-            "students": [_serialize_user(student) for student in students],
-            "teachers": [_serialize_user(teacher) for teacher in teachers],
-            "classes": [_serialize_class(classroom) for classroom in classes],
+            "students": [_serialize_user(student, class_map, teacher_classes_map) for student in students],
+            "teachers": [_serialize_user(teacher, class_map, teacher_classes_map) for teacher in teachers],
+            "classes": [_serialize_class(classroom, teacher_map, student_map) for classroom in classes],
         }
     ), 200
 
@@ -1035,12 +1095,21 @@ def dashboard_analytics():
     recent_events = recent_events[:12]
 
     active_player_ids = set()
-    for row in MissionProgress.query.filter(MissionProgress.user_id.in_(student_ids), MissionProgress.updated_at >= cutoff_dt).all():
-        active_player_ids.add(row.user_id)
-    for row in QuizResult.query.filter(QuizResult.student_id.in_(student_ids), QuizResult.updated_at >= cutoff_dt).all():
-        active_player_ids.add(row.student_id)
-    for row in PlaytimeLog.query.filter(PlaytimeLog.user_id.in_(student_ids), PlaytimeLog.date >= cutoff_date).all():
-        active_player_ids.add(row.user_id)
+    
+    mp_active = db.session.query(MissionProgress.user_id).filter(
+        MissionProgress.user_id.in_(student_ids), MissionProgress.updated_at >= cutoff_dt
+    ).all()
+    for (uid,) in mp_active: active_player_ids.add(uid)
+        
+    qr_active = db.session.query(QuizResult.student_id).filter(
+        QuizResult.student_id.in_(student_ids), QuizResult.updated_at >= cutoff_dt
+    ).all()
+    for (uid,) in qr_active: active_player_ids.add(uid)
+        
+    pl_active = db.session.query(PlaytimeLog.user_id).filter(
+        PlaytimeLog.user_id.in_(student_ids), PlaytimeLog.date >= cutoff_date
+    ).all()
+    for (uid,) in pl_active: active_player_ids.add(uid)
 
     total_active_players = len(active_player_ids)
     average_completion_rate = round(sum(total_completion_rates) / len(total_completion_rates), 1) if total_completion_rates else 0.0
