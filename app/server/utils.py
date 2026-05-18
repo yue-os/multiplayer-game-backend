@@ -34,19 +34,17 @@ def get_local_ip():
 
 def get_configured_base_url(env_var, default_port=5173):
     """
-    Gets the base URL from environment variables, 
-    replacing localhost with the device IP if necessary.
+    Gets the base URL from environment variables.
+    Explicit env values are returned as-is so deployed links keep their public URL.
     """
-    base_url = (
-        os.getenv(env_var)
-        or os.getenv("PASSWORD_RESET_BASE_URL")
-        or os.getenv("FRONTEND_BASE_URL")
-        or os.getenv("RESET_LINK_BASE_URL")
-        or f"http://localhost:{default_port}"
-    ).rstrip("/")
-    
+    for name in (env_var, "PASSWORD_RESET_BASE_URL", "FRONTEND_BASE_URL", "RESET_LINK_BASE_URL"):
+        base_url = os.getenv(name)
+        if base_url:
+            return base_url.rstrip("/")
+
+    base_url = f"http://localhost:{default_port}"
     if "localhost" in base_url or "127.0.0.1" in base_url:
         local_ip = get_local_ip()
         base_url = base_url.replace("localhost", local_ip).replace("127.0.0.1", local_ip)
-    
+
     return base_url
