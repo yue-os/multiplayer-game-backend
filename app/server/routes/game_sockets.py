@@ -89,6 +89,11 @@ class LobbySocketHub:
             
             # Assign initial infected player if we have enough players and no one is infected yet
             # Never make a Doctor the infected player (doctors are immune)
+            carriers = [p for p in lobby_runtime.game_state.players if p.is_carrier]
+            if len(carriers) > 1:
+                for extra_carrier in carriers[1:]:
+                    extra_carrier.is_carrier = False
+                    
             if not any(p.is_carrier for p in lobby_runtime.game_state.players):
                 # Find non-doctor players to be patient zero
                 non_doctor_players = [
@@ -435,6 +440,7 @@ class LobbySocketHub:
             "player_id": player.player_id,
             "visible_role": player.visible_role.value,
             "is_carrier": player.is_carrier,
+            "is_infected": player.is_carrier,
             "health_status": player.health_status.value,
             "inventory": {item.value: count for item, count in player.inventory.items()},
             "mission_completed": player.mission_completed,
