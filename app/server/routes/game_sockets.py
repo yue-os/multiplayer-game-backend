@@ -117,8 +117,9 @@ class LobbySocketHub:
         if lobby_runtime.subscription_task is None or lobby_runtime.subscription_task.done():
             lobby_runtime.subscription_task = asyncio.create_task(self._listen_for_updates(lobby_id))
 
-        if lobby_runtime.timer_task is None or lobby_runtime.timer_task.done():
-            lobby_runtime.timer_task = asyncio.create_task(self.start_event_timer(lobby_id))
+        # DO NOT automatically start the timer here.
+        # Wait for the frontend to hit /ws/lobby/{lobby_id}/start_event_timer
+        # when the required number of players is met.
 
         # Send initial authoritative game state immediately so clients see round 1
         await self.broadcast_game_state(lobby_id)
