@@ -41,6 +41,8 @@ class LobbyRuntime(BaseModel):
     subscription_task: asyncio.Task[None] | None = None
     round_started_at: float = Field(default_factory=time.monotonic)
     round_duration_seconds: float = 60.0
+    creator_player_id: str = ""
+    started: bool = False
 
 
 class LobbySocketHub:
@@ -69,6 +71,9 @@ class LobbySocketHub:
             
             lobby_runtime = LobbyRuntime(game_state=game_state, engine=GameEngine(game_state))
             self._lobbies[lobby_id] = lobby_runtime
+
+        if lobby_runtime.creator_player_id == "":
+            lobby_runtime.creator_player_id = player_id
 
         # Ensure the lobby starts at round 1 and reset the round timer anchor
         lobby_runtime.game_state.current_round = max(1, int(lobby_runtime.game_state.current_round))
@@ -112,10 +117,8 @@ class LobbySocketHub:
         if lobby_runtime.subscription_task is None or lobby_runtime.subscription_task.done():
             lobby_runtime.subscription_task = asyncio.create_task(self._listen_for_updates(lobby_id))
 
-        if lobby_runtime.timer_task is None or lobby_runtime.timer_task.done():
-            lobby_runtime.timer_task = asyncio.create_task(self.start_event_timer(lobby_id))
-
-        # Send initial authoritative game state immediately so clients see round 1
+        # Send the waiting-room state immediately. The creator starts the timer
+        # explicitly after pressing Start Game.
         await self.broadcast_game_state(lobby_id)
 
         return player_id
@@ -201,6 +204,33 @@ class LobbySocketHub:
             },
         )
 
+    async def start_lobby(self, lobby_id: str, player_id: str) -> None:
+        runtime = self._get_lobby_runtime_or_raise(lobby_id)
+        actual_creator_id = runtime.game_state.players[0].player_id if runtime.game_state.players else runtime.creator_player_id
+        
+        if player_id != actual_creator_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only the player who created the lobby can start the game.",
+            )
+        if runtime.started:
+            return
+
+        runtime.started = True
+        runtime.round_started_at = time.monotonic()
+        runtime.timer_task = asyncio.create_task(self.start_event_timer(lobby_id))
+
+        redis_client = get_async_redis()
+        if redis_client:
+            await redis_client.publish(f"lobby:{lobby_id}:events", "start")
+
+        async def delayed_timer_start():
+            await asyncio.sleep(10.0)
+            runtime.round_started_at = time.monotonic()
+            runtime.timer_task = asyncio.create_task(self.start_event_timer(lobby_id))
+        
+        await self.broadcast_game_state(lobby_id)
+
     async def broadcast_game_state(self, lobby_id: str, game_over: bool = False, scores: list[dict] | None = None) -> None:
         # Reload state from Redis to ensure we are authoritative
         cached_state = GameStateCache.load_state(lobby_id)
@@ -217,12 +247,14 @@ class LobbySocketHub:
         players_public = [self._public_player_payload(player) for player in runtime.game_state.players]
         now = time.monotonic()
         elapsed = max(0.0, now - runtime.round_started_at)
-        timer_left = max(0.0, runtime.round_duration_seconds - elapsed)
+        timer_left = max(0.0, runtime.round_duration_seconds - elapsed) if runtime.started else runtime.round_duration_seconds
 
         for recipient_id, recipient_socket in list(lobby_connections.items()):
             recipient = self._find_player(runtime.game_state, recipient_id)
             if recipient is None:
                 continue
+
+            actual_creator_id = runtime.game_state.players[0].player_id if runtime.game_state.players else runtime.creator_player_id
 
             data: dict[str, object] = {
                 "lobby_id": lobby_id,
@@ -233,6 +265,8 @@ class LobbySocketHub:
                 "server_time": time.time(),
                 "round_duration_seconds": runtime.round_duration_seconds,
                 "round_timer_left": timer_left,
+                "started": runtime.started,
+                "can_start": recipient_id == actual_creator_id,
                 "public_players": players_public,
                 "you": self._private_player_payload(recipient),
             }
@@ -257,6 +291,8 @@ class LobbySocketHub:
                     return
 
                 runtime = self._lobbies[lobby_id]
+                if not runtime.started:
+                    continue
                 if time.monotonic() < runtime.round_started_at + runtime.round_duration_seconds:
                     await self.broadcast_game_state(lobby_id)
                     continue
@@ -324,11 +360,19 @@ class LobbySocketHub:
         
         try:
             while True:
-                # Use a small timeout to allow checking for cancellation
                 message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
                 if message:
-                    # State updated on another worker, reload and broadcast
-                    await self.broadcast_game_state(lobby_id)
+                    msg_data = message.get("data", "")
+                    msg_str = msg_data.decode("utf-8") if isinstance(msg_data, bytes) else str(msg_data)
+
+                    if msg_str == "start":
+                        runtime = self._lobbies.get(lobby_id)
+                        if runtime and not runtime.started:
+                            runtime.started = True
+                            # Force a broadcast to trigger the countdown UI for clients on this worker
+                            await self.broadcast_game_state(lobby_id)
+                    elif msg_str == "update":
+                        await self.broadcast_game_state(lobby_id)
                 await asyncio.sleep(0.1) # Yield control
         except asyncio.CancelledError:
             await pubsub.unsubscribe(channel)
@@ -495,15 +539,27 @@ async def connect_to_lobby(websocket: WebSocket, lobby_id: str, player_token: st
             incoming = await websocket.receive_json()
             envelope = SocketEnvelope.model_validate(incoming)
 
-            if envelope.event == "request_trade":
+            if envelope.event == "start_game":
+                await socket_hub.start_lobby(lobby_id, player_id)
+            elif envelope.event == "request_trade":
                 await socket_hub.handle_trade(lobby_id, player_id, envelope.data)
+            elif envelope.event == "peer_rpc":
+                target_id = envelope.data.get("target_player_id", "")
+                payload = {"event": "peer_rpc", "data": envelope.data}
+                
+                if target_id != "":
+                    # Send to specific player
+                    await socket_hub._send_to_player(lobby_id, target_id, payload)
+                else:
+                    # Broadcast to everyone in the lobby
+                    await socket_hub._broadcast_to_lobby(lobby_id, payload)
             else:
                 await websocket.send_json(
                     {
                         "event": "error",
                         "data": {
                             "detail": f"Unsupported event '{envelope.event}'.",
-                            "supported_events": ["request_trade"],
+                            "supported_events": ["start_game", "request_trade"],
                         },
                     }
                 )
