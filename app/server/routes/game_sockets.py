@@ -373,6 +373,15 @@ class LobbySocketHub:
                             await self.broadcast_game_state(lobby_id)
                     elif msg_str == "update":
                         await self.broadcast_game_state(lobby_id)
+                    elif msg_str.startswith("peer_rpc:"):
+                        import json
+                        payload_str = msg_str.split(":", 1)[1]
+                        payload = json.loads(payload_str)
+                        target_id = payload["data"].get("target_player_id", "")
+                        if target_id != "":
+                            await self._send_to_player(lobby_id, target_id, payload)
+                        else:
+                            await self._broadcast_to_lobby(lobby_id, payload)
                 await asyncio.sleep(0.1) # Yield control
         except asyncio.CancelledError:
             await pubsub.unsubscribe(channel)
@@ -546,13 +555,25 @@ async def connect_to_lobby(websocket: WebSocket, lobby_id: str, player_token: st
             elif envelope.event == "peer_rpc":
                 target_id = envelope.data.get("target_player_id", "")
                 payload = {"event": "peer_rpc", "data": envelope.data}
-                
-                if target_id != "":
-                    # Send to specific player
-                    await socket_hub._send_to_player(lobby_id, target_id, payload)
+
+                redis_client = get_async_redis()
+                if redis_client:
+                    import json
+                    await redis_client.publish(f"lobby:{lobby_id}:events", f"peer_rpc:{json.dumps(payload)}")
                 else:
-                    # Broadcast to everyone in the lobby
-                    await socket_hub._broadcast_to_lobby(lobby_id, payload)
+                    if target_id != "":
+                        # Send to specific player
+                        await socket_hub._send_to_player(lobby_id, target_id, payload)
+                    else:
+                        # Broadcast to everyone in the lobby
+                        await socket_hub._broadcast_to_lobby(lobby_id, payload)
+                
+                # if target_id != "":
+                #     # Send to specific player
+                #     await socket_hub._send_to_player(lobby_id, target_id, payload)
+                # else:
+                #     # Broadcast to everyone in the lobby
+                #     await socket_hub._broadcast_to_lobby(lobby_id, payload)
             else:
                 await websocket.send_json(
                     {
