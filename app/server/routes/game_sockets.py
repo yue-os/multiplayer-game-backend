@@ -620,7 +620,7 @@ async def list_ws_lobbies() -> list[dict]:
     for lobby_id, runtime in socket_hub._lobbies.items():
         connections = socket_hub._connections.get(lobby_id, {})
         current_players = len(connections)
-        required_players = int(runtime.round_duration_seconds) if runtime is not None else 2
+        required_players = int(runtime.round_duration_seconds) if runtime is not None else 8
 
         result.append(
             {

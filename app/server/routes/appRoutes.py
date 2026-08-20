@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, Response
 from app.server.database import db
-from app.server.models.user import GameServer, MissionProgress, Mission
+from app.server.models.user import GameServer, MissionProgress, Mission,  User
 from app.auth.auth_bearer import token_required
 from sqlalchemy import or_
 import time
@@ -14,6 +14,7 @@ import threading
 import traceback
 from urllib.parse import urlencode
 from urllib.request import urlopen
+
 
 app_bp = Blueprint('app_routes', __name__)
 
@@ -431,22 +432,35 @@ def list_servers():
 
     # Also include any in-memory websocket relay lobbies from socket_hub.
     try:
-        for lobby_id, runtime in socket_hub._lobbies.items():
+        for lobby_id, runtime in list(socket_hub._lobbies.items()):
             connections = socket_hub._connections.get(lobby_id, {})
             current_players = len(connections)
+            
+            lobby_name = f"Lobby {lobby_id}"
+            if hasattr(runtime, 'creator_player_id') and runtime.creator_player_id:
+                try:
+                    creator = db.session.get(User, int(runtime.creator_player_id))
+                    if creator:
+                        c_name = (creator.first_name or creator.username).strip().split(" ")[0]
+                        lobby_name = f"{c_name}'s Lobby"
+                except Exception:
+                    pass
+
+            is_started = getattr(runtime, 'started', False)
+
             server_list.append({
                 "ip": "",
                 "port": 0,
-                "name": f"{lobby_id}",
+                "name": lobby_name, # <--- Now uses the creator's name!
                 "count": current_players,
                 "persistent": False,
                 "teacher_lobby": False,
                 "online": True,
-                "joinable": True,
+                "joinable": not is_started,
                 "current_players": current_players,
                 "required_players": 2,
-                "started": False,
-                "status": "Relay",
+                "started": is_started,
+                "status": "Started" if is_started else "Not yet started",
                 "websocket": True,
                 "lobby_id": lobby_id,
             })
