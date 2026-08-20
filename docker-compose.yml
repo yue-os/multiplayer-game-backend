@@ -54,7 +54,7 @@ services:
       - .:/app
     networks:
       - game-network
-    command: gunicorn --workers 4 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 fastapi_main:app
+    command: gunicorn --workers 1 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000 fastapi_main:app
 
 networks:
   game-network:
