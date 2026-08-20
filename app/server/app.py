@@ -16,6 +16,7 @@ from app.server.routes.teacher import teacher_bp
 from app.server.routes.parent import parent_bp
 from app.server.routes.docs import docs_bp
 from app.server.routes.admin_users_flask import admin_users_bp
+from app.server.discord_logger import DiscordWebhookHandler
 
 LAN_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?"
 LAN_ORIGIN_PATTERN = re.compile(f"^{LAN_ORIGIN_REGEX}$")
@@ -70,6 +71,18 @@ ALLOWED_ORIGINS = _load_allowed_origins()
 def create_app():
     app = Flask(__name__)
     _maybe_start_udp_discovery()
+
+    discord_handler = DiscordWebhookHandler()
+    # THIS is the magic line that ensures ONLY warnings and errors are sent!
+    discord_handler.setLevel(logging.WARNING) 
+    
+    # Optional: Make the log message look a bit cleaner
+    formatter = logging.Formatter('%(levelname)s in %(module)s: %(message)s')
+    discord_handler.setFormatter(formatter)
+    
+    # Attach it to your custom logger AND Flask's crash logger
+    logger.addHandler(discord_handler)
+    app.logger.addHandler(discord_handler)
     
     # Configuration
     app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
