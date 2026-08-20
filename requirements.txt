@@ -16,4 +16,3 @@ gevent-websocket
 asgiref
 redis
 requests
-logging
