@@ -26,5 +26,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 # Run application
 # Run the combined ASGI app so both Flask REST routes and FastAPI WebSockets
 # are served from the same port.
-CMD ["sh", "-c", "gunicorn --workers 4 --worker-class uvicorn.workers.UvicornWorker --access-logfile - --bind 0.0.0.0:${PORT:-8000} fastapi_main:app"]
+CMD ["sh", "-c", "gunicorn --workers 1 --worker-class uvicorn.workers.UvicornWorker --access-logfile - --bind 0.0.0.0:${PORT:-8000} fastapi_main:app"]
 
