@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, Response
+from flask import Blueprint, request, jsonify, Response, send_from_directory
 from app.server.database import db
 from app.server.models.user import GameServer, MissionProgress, Mission,  User
 from app.auth.auth_bearer import token_required
@@ -14,6 +14,7 @@ import threading
 import traceback
 from urllib.parse import urlencode
 from urllib.request import urlopen
+from werkzeug.utils import secure_filename
 
 
 app_bp = Blueprint('app_routes', __name__)
@@ -23,6 +24,8 @@ _ITCH_LATEST_API = "https://itch.io/api/1/x/wharf/latest"
 _ITCH_SYNC_TARGET = os.getenv("ITCH_SYNC_TARGET", "grahambel/batangaware").strip()
 _ITCH_SYNC_CHANNEL = os.getenv("ITCH_SYNC_CHANNEL", "android").strip()
 _ITCH_SYNC_INTERVAL_SECONDS = max(10, int(os.getenv("ITCH_SYNC_INTERVAL_SECONDS", "300")))
+
+_UPDATE_DIR = Path(__file__).resolve().parents[1] / "data" / "updates"
 
 _version_sync_lock = threading.Lock()
 _last_sync_attempt_at = 0.0
@@ -506,3 +509,38 @@ def update_mission():
         
     db.session.commit()
     return jsonify({'message': 'Progress saved'}), 200
+
+
+@app_bp.route('/admin/upload-patch', methods=['POST'])
+def upload_patch():
+    """Secure endpoint for GitHub Actions to upload the .pck patch."""
+    # Basic security: Check for the secret token in the Authorization header
+    auth_header = request.headers.get('Authorization')
+    expected_token = f"Bearer {os.getenv('UPDATE_SECRET_TOKEN')}"
+    
+    if auth_header != expected_token:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    version = request.form.get('version')
+    patch_file = request.files.get('patch_file')
+
+    if not version or not patch_file:
+        return jsonify({'error': 'Missing version or patch_file'}), 400
+
+    # Ensure the updates directory exists
+    _UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Save the version to a separate OTA version file
+    with open(_UPDATE_DIR / 'version.txt', 'w', encoding="utf-8") as f:
+        f.write(version.strip())
+
+    # Save the actual .pck file
+    patch_path = _UPDATE_DIR / 'patch.pck'
+    patch_file.save(patch_path)
+
+    return jsonify({'message': 'Patch uploaded successfully!', 'version': version}), 200
+
+@app_bp.route('/updates/<path:filename>', methods=['GET'])
+def download_update(filename):
+    """Public endpoint for the game client to download the patch and version files."""
+    return send_from_directory(_UPDATE_DIR, filename)
