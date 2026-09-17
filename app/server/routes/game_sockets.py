@@ -43,6 +43,7 @@ class LobbyRuntime(BaseModel):
     round_duration_seconds: float = 60.0
     creator_player_id: str = ""
     started: bool = False
+    bot_counter: int = 0
 
 
 class LobbySocketHub:
@@ -122,6 +123,41 @@ class LobbySocketHub:
         await self.broadcast_game_state(lobby_id)
 
         return player_id
+
+    async def add_bot(self, lobby_id: str, player_id: str, display_name: str = "") -> None:
+        runtime = self._get_lobby_runtime_or_raise(lobby_id)
+        actual_creator_id = runtime.game_state.players[0].player_id if runtime.game_state.players else runtime.creator_player_id
+        
+        if player_id != actual_creator_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the host can add bots.")
+        if runtime.started:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Cannot add bots after game has started.")
+
+        # Increment counter and build the bot profile
+        runtime.bot_counter += 1
+        bot_id = f"bot_{runtime.bot_counter}"
+        bot_name = display_name.strip() or f"Bot {runtime.bot_counter}"
+        
+        # Cycle roles so bots aren't all the same
+        role_cycle = [VisibleRole.STUDENT, VisibleRole.VENDOR, VisibleRole.CARETAKER, VisibleRole.GUARD]
+        bot_role = role_cycle[len(runtime.game_state.players) % len(role_cycle)]
+
+        new_bot = PlayerState(
+            player_id=bot_id,
+            display_name=bot_name,
+            visible_role=bot_role,
+            inventory={ItemType.SNACKS: 2, ItemType.MASKS: 1},
+            health_status=HealthStatus.HEALTHY,
+        )
+        runtime.game_state.players.append(new_bot)
+
+        # Save to Redis and broadcast to the lobby
+        GameStateCache.save_state(lobby_id, runtime.game_state.model_dump())
+        redis_client = get_async_redis()
+        if redis_client:
+            await redis_client.publish(f"lobby:{lobby_id}:events", "update")
+            
+        await self.broadcast_game_state(lobby_id)
 
     def disconnect_from_lobby(self, lobby_id: str, player_id: str) -> None:
         lobby_connections = self._connections.get(lobby_id)
@@ -478,6 +514,7 @@ class LobbySocketHub:
     def _public_player_payload(self, player: PlayerState) -> dict[str, Any]:
         return {
             "player_id": player.player_id,
+            "display_name": player.display_name or player.player_id,
             "visible_role": player.visible_role.value,
             "inventory": {item.value: count for item, count in player.inventory.items()},
             "mission_completed": player.mission_completed,
@@ -486,6 +523,7 @@ class LobbySocketHub:
     def _private_player_payload(self, player: PlayerState) -> dict[str, Any]:
         return {
             "player_id": player.player_id,
+            "display_name": player.display_name or player.player_id,
             "visible_role": player.visible_role.value,
             "is_carrier": player.is_carrier,
             "health_status": player.health_status.value,
@@ -550,6 +588,12 @@ async def connect_to_lobby(websocket: WebSocket, lobby_id: str, player_token: st
 
             if envelope.event == "start_game":
                 await socket_hub.start_lobby(lobby_id, player_id)
+            elif envelope.event == "add_bot":
+                await socket_hub.add_bot(
+                    lobby_id,
+                    player_id,
+                    str(envelope.data.get("display_name", "")),
+                )
             elif envelope.event == "request_trade":
                 await socket_hub.handle_trade(lobby_id, player_id, envelope.data)
             elif envelope.event == "peer_rpc":
@@ -580,7 +624,7 @@ async def connect_to_lobby(websocket: WebSocket, lobby_id: str, player_token: st
                         "event": "error",
                         "data": {
                             "detail": f"Unsupported event '{envelope.event}'.",
-                            "supported_events": ["start_game", "request_trade"],
+                            "supported_events": ["start_game", "request_trade", "add_bot"],
                         },
                     }
                 )
