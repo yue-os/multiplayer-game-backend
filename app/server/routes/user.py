@@ -1,8 +1,9 @@
 
+import io
 from datetime import datetime, timezone
 import hashlib
 import secrets
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_file
 from sqlalchemy import func
 from werkzeug.security import generate_password_hash, check_password_hash
 from app.server.database import db
@@ -313,6 +314,25 @@ def update_own_profile():
 
     db.session.commit()
     return jsonify({'message': 'Profile updated successfully', 'user': user.to_dict()}), 200
+
+
+@user_bp.route('/user/<int:player_id>/profile-picture', methods=['GET'])
+@token_required
+def get_profile_picture(player_id):
+    """Serve the raw binary profile picture for a specific player."""
+    user = User.query.get(player_id)
+    
+    # If the user doesn't exist, or they haven't uploaded a picture, return 404
+    if not user or not getattr(user, 'profile_pic', None):
+        return jsonify({'error': 'Profile picture not found'}), 404
+
+    # Send the raw bytes stored in the database directly to the Godot client
+    return send_file(
+        io.BytesIO(user.profile_pic),
+        mimetype='image/png', # Godot will figure out the actual format (PNG/JPG/WEBP) from the binary headers
+        as_attachment=False,
+        download_name=f"profile_{player_id}.png"
+    )
 
 
 @user_bp.route('/ping', methods=['GET'])

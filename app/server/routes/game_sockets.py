@@ -47,6 +47,9 @@ class LobbyRuntime(BaseModel):
 
 
 class LobbySocketHub:
+    MIN_PLAYERS = 4
+    MAX_PLAYERS = 8
+
     def __init__(self) -> None:
         self._connections: dict[str, dict[str, WebSocket]] = {}
         self._lobbies: dict[str, LobbyRuntime] = {}
@@ -132,6 +135,8 @@ class LobbySocketHub:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the host can add bots.")
         if runtime.started:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Cannot add bots after game has started.")
+        if len(runtime.game_state.players) >= self.MAX_PLAYERS:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Lobby is full. Maximum is 8 players.")
 
         # Increment counter and build the bot profile
         runtime.bot_counter += 1
@@ -248,6 +253,17 @@ class LobbySocketHub:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only the player who created the lobby can start the game.",
+            )
+        player_count = len(runtime.game_state.players)
+        if player_count < self.MIN_PLAYERS:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="At least 4 players are required to start the game.",
+            )
+        if player_count > self.MAX_PLAYERS:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A maximum of 8 players is allowed.",
             )
         if runtime.started:
             return
@@ -518,6 +534,8 @@ class LobbySocketHub:
             "visible_role": player.visible_role.value,
             "inventory": {item.value: count for item, count in player.inventory.items()},
             "mission_completed": player.mission_completed,
+            "profile_pic_url": f"/user/{player.player_id}/profile-picture",
+            "profile_pic_version": "1"
         }
 
     def _private_player_payload(self, player: PlayerState) -> dict[str, Any]:
@@ -685,7 +703,7 @@ async def list_ws_lobbies() -> list[dict]:
     for lobby_id, runtime in socket_hub._lobbies.items():
         connections = socket_hub._connections.get(lobby_id, {})
         current_players = len(connections)
-        required_players = int(runtime.round_duration_seconds) if runtime is not None else 8
+        required_players = int(runtime.round_duration_seconds) if runtime is not None else 4
 
         result.append(
             {
