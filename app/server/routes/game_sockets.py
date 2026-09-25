@@ -419,6 +419,10 @@ class LobbySocketHub:
                             # Force a broadcast to trigger the countdown UI for clients on this worker
                             await self.broadcast_game_state(lobby_id)
                     elif msg_str == "update":
+                        cached_state = GameStateCache.load_state(lobby_id)
+                        runtime = self._lobbies.get(lobby_id)
+                        if cached_state is not None and runtime is not None:
+                            runtime.game_state = GameState.model_validate(cached_state)
                         await self.broadcast_game_state(lobby_id)
                     elif msg_str.startswith("peer_rpc:"):
                         import json
