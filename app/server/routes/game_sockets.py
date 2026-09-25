@@ -47,7 +47,7 @@ class LobbyRuntime(BaseModel):
 
 
 class LobbySocketHub:
-    MIN_PLAYERS = 4
+    MIN_PLAYERS = 2
     MAX_PLAYERS = 8
 
     def __init__(self) -> None:
@@ -247,6 +247,10 @@ class LobbySocketHub:
 
     async def start_lobby(self, lobby_id: str, player_id: str) -> None:
         runtime = self._get_lobby_runtime_or_raise(lobby_id)
+        cached_state = GameStateCache.load_state(lobby_id)
+        if cached_state is not None:
+            runtime.game_state = GameState.model_validate(cached_state)
+            runtime.engine = GameEngine(runtime.game_state)
         actual_creator_id = runtime.game_state.players[0].player_id if runtime.game_state.players else runtime.creator_player_id
         
         if player_id != actual_creator_id:
@@ -658,8 +662,6 @@ async def connect_to_lobby(websocket: WebSocket, lobby_id: str, player_token: st
                 },
             }
         )
-        socket_hub.disconnect_from_lobby(lobby_id, locals().get("player_id", ""))
-        await websocket.close(code=1008)
     except ValidationError as exc:
         await websocket.send_json(
             {
