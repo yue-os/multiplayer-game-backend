@@ -284,12 +284,7 @@ class LobbySocketHub:
         await self.broadcast_game_state(lobby_id)
 
     async def broadcast_game_state(self, lobby_id: str, game_over: bool = False, scores: list[dict] | None = None) -> None:
-        # Reload state from Redis to ensure we are authoritative
-        cached_state = GameStateCache.load_state(lobby_id)
-        if cached_state:
-            runtime_obj = self._lobbies.get(lobby_id)
-            if runtime_obj:
-                runtime_obj.game_state = GameState.model_validate(cached_state)
+        # We removed the GameStateCache.load_state here to prevent overwriting active memory!
         
         runtime = self._get_lobby_runtime_or_raise(lobby_id)
         lobby_connections = self._connections.get(lobby_id, {})

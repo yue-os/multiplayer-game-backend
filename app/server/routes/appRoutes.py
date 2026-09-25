@@ -430,7 +430,8 @@ def list_servers():
             "required_players": required_players,
             "started": is_started,
             "status": status,
-            "lobby_id": s.public_id
+            "lobby_id": s.public_id,
+            "websocket": True,
         })
 
     # Also include any in-memory websocket relay lobbies from socket_hub.

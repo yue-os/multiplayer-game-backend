@@ -255,13 +255,13 @@ def _serialize_lobby(lobby: GameServer, classroom, teacher_id: int):
 def _generated_lobby_host():
     configured_host = os.getenv('LOBBY_HOST_IP', '').strip()
     if configured_host:
-        return configured_host
+        return configured_host[:50]
 
     host = (request.host or '').split(':', 1)[0].strip()
     if host:
-        return host
+        return host[:50]
 
-    return (request.remote_addr or '127.0.0.1').strip()
+    return (request.remote_addr or '127.0.0.1').strip()[:50]
 
 
 def _port_range():
@@ -1058,7 +1058,7 @@ def create_lobby():
         except (TypeError, ValueError):
             return jsonify({'error': 'port must be a positive integer'}), 400
 
-        ip = requested_ip
+        ip = requested_ip[:50]
         existing = GameServer.query.filter_by(ip=ip, port=port).first()
         if existing:
             return jsonify({'error': 'Generated lobby endpoint is already in use. Refresh lobbies and try again.'}), 409
