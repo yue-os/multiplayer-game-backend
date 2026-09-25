@@ -434,7 +434,9 @@ class LobbySocketHub:
                         payload = json.loads(payload_str)
                         target_id = payload["data"].get("target_player_id", "")
                         if target_id != "":
-                            await self._send_to_player(lobby_id, target_id, payload)
+                            delivered = await self._send_to_player(lobby_id, target_id, payload)
+                            if not delivered:
+                                await self._broadcast_to_lobby(lobby_id, payload)
                         else:
                             await self._broadcast_to_lobby(lobby_id, payload)
                 await asyncio.sleep(0.1) # Yield control
@@ -488,13 +490,14 @@ class LobbySocketHub:
             )
         return runtime
 
-    async def _send_to_player(self, lobby_id: str, player_id: str, message: dict[str, Any]) -> None:
+    async def _send_to_player(self, lobby_id: str, player_id: str, message: dict[str, Any]) -> bool:
         lobby_connections = self._connections.get(lobby_id, {})
         websocket = lobby_connections.get(player_id)
         if websocket is None:
             # In multi-worker setup, player might be on another worker
-            return
+            return False
         await websocket.send_json(message)
+        return True
 
     async def _broadcast_to_lobby(self, lobby_id: str, message: dict[str, Any]) -> None:
         lobby_connections = self._connections.get(lobby_id, {})
