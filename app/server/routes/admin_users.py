@@ -9,12 +9,13 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, delete, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
-from sqlalchemy import String, Integer
+from sqlalchemy import String, Integer, Boolean
 from werkzeug.security import generate_password_hash
 
+from app.server.models.user import PasswordResetRequest, PlaytimeLog, MissionProgress, QuizResult, Class, Quiz
 
 class UserRole(str, Enum):
     ADMIN = "Admin"
@@ -37,6 +38,7 @@ class UserRecord(Base):
     username: Mapped[str] = mapped_column(String(80), unique=True, nullable=False)
     email: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     class_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -136,6 +138,7 @@ def create_user(payload: AdminUserCreate, db: Session = Depends(get_db_session))
         username=payload.username,
         email=payload.email,
         password_hash=generate_password_hash(payload.password),
+        must_change_password=False,
         role=payload.role.value,
     )
 
@@ -168,8 +171,38 @@ def delete_user(user_id: int, db: Session = Depends(get_db_session)) -> dict[str
             detail="User not found.",
         )
 
+    db.execute(delete(PasswordResetRequest).where(PasswordResetRequest.user_id == user_id))
+
+    if user.role == "Student":
+        db.execute(delete(PlaytimeLog).where(PlaytimeLog.user_id == user_id))
+        db.execute(delete(MissionProgress).where(MissionProgress.user_id == user_id))
+        db.execute(delete(QuizResult).where(QuizResult.student_id == user_id))
+        
+    elif user.role == "Parent":
+        db.execute(update(UserRecord).where(UserRecord.parent_id == user_id).values(parent_id=None))
+
+    elif user.role == "Teacher":
+        # Guard check: Prevent deletion if they own classes or quizzes
+        assigned_classes = db.execute(select(Class).where(Class.teacher_id == user_id)).first()
+        assigned_quizzes = db.execute(select(Quiz).where(Quiz.teacher_id == user_id)).first()
+        
+        if assigned_classes or assigned_quizzes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Please reassign this teacher's classes and quizzes to another teacher before deleting their account."
+            )
+
     db.delete(user)
-    db.commit()
+
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user: {str(exc)}"
+        )
+
     return {"message": "User deleted successfully.", "user_id": user_id}
 
 
@@ -199,6 +232,7 @@ def update_user(user_id: int, payload: AdminUserUpdate, db: Session = Depends(ge
     user.role = payload.role.value
     if payload.password:
         user.password_hash = generate_password_hash(payload.password)
+        user.must_change_password = False
 
     try:
         db.commit()
