@@ -2,6 +2,7 @@ Flask
 Flask-CORS
 Flask-SQLAlchemy==3.1.1
 psycopg2-binary
+psycopg[binary]
 python-dotenv==1.0.0
 PyJWT==2.8.0
 Werkzeug==3.0.1
