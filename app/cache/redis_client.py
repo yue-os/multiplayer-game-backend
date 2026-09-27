@@ -9,6 +9,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_MAX_CONNECTIONS = int(os.getenv("REDIS_MAX_CONNECTIONS", "300"))
+if REDIS_MAX_CONNECTIONS < 1:
+    raise ValueError("REDIS_MAX_CONNECTIONS must be greater than zero")
 
 # Synchronous client for Flask routes
 try:
@@ -20,7 +23,11 @@ except redis.ConnectionError as e:
     redis_client = None
 
 # Asynchronous client for FastAPI/WebSockets
-async_redis_client = async_redis.from_url(REDIS_URL, decode_responses=True)
+async_redis_client = async_redis.from_url(
+    REDIS_URL,
+    decode_responses=True,
+    max_connections=REDIS_MAX_CONNECTIONS,
+)
 
 
 def get_redis():

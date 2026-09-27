@@ -1061,7 +1061,10 @@ def create_lobby():
         ip = requested_ip[:50]
         existing = GameServer.query.filter_by(ip=ip, port=port).first()
         if existing:
-            return jsonify({'error': 'Generated lobby endpoint is already in use. Refresh lobbies and try again.'}), 409
+            try:
+                ip, port = _allocate_lobby_endpoint()
+            except RuntimeError:
+                return jsonify({'error': 'No available lobby endpoints'}), 503
     else:
         try:
             ip, port = _allocate_lobby_endpoint()

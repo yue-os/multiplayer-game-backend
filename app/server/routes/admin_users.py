@@ -7,13 +7,14 @@ from datetime import datetime
 from typing import Generator
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, select, delete, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy import String, Integer, Boolean
 from werkzeug.security import generate_password_hash
+from app.auth.auth_handler import decodeJWT
 
 from app.server.models.user import PasswordResetRequest, PlaytimeLog, MissionProgress, QuizResult, Class, Quiz
 
@@ -74,7 +75,33 @@ class AdminUserRead(BaseModel):
     role: UserRole
 
 
-router = APIRouter(prefix="/api/admin/users", tags=["admin-users"])
+def require_admin(authorization: str | None = Header(default=None)) -> None:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="A valid bearer token is required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    payload = decodeJWT(authorization.removeprefix("Bearer ").strip())
+    if not payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="The bearer token is invalid or expired.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if payload.get("role") != UserRole.ADMIN.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access is required.",
+        )
+
+
+router = APIRouter(
+    prefix="/api/admin/users",
+    tags=["admin-users"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 @lru_cache(maxsize=1)
