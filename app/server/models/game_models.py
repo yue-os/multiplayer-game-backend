@@ -36,6 +36,7 @@ class HealthStatus(str, Enum):
 
 class PlayerState(BaseModel):
     player_id: str
+    profile_pic_version: str = ""
     display_name: str = ""
     visible_role: VisibleRole
     is_carrier: bool = False

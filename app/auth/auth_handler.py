@@ -1,17 +1,19 @@
 import time
 import jwt
 import os
-from typing import Dict
+from typing import Any, Dict
 
 JWT_SECRET = os.getenv("JWT_SECRET", "default_secret")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
-def signJWT(user_id: str, role: str) -> Dict[str, str]:
+def signJWT(user_id: str, role: str, extra_claims: dict[str, Any] | None = None) -> Dict[str, str]:
     payload = {
         "user_id": user_id,
         "role": role,
         "expiry": time.time() + 86400  # 24 hours
     }
+    if extra_claims:
+        payload.update(extra_claims)
     token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
     return {"access_token": token}
 

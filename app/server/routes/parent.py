@@ -306,8 +306,10 @@ def get_parent_stats():
         ]
         
         # Calculate average scores
-        mission_avg = float(sum(m['score'] for m in mission_data) / len(mission_data)) if mission_data else 0.0
-        quiz_avg = float(sum(q['score'] for q in quiz_data) / len(quiz_data)) if quiz_data else 0.0
+        # Older progress rows can have a NULL score despite the model default.
+        # Treat those as zero so one incomplete row cannot fail the parent dashboard.
+        mission_avg = float(sum(m['score'] or 0 for m in mission_data) / len(mission_data)) if mission_data else 0.0
+        quiz_avg = float(sum(q['score'] or 0 for q in quiz_data) / len(quiz_data)) if quiz_data else 0.0
         total_playtime = sum(log.duration_minutes or 0 for log in playtime_logs)
         
         stats_list.append({

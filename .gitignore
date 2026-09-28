@@ -1,5 +1,7 @@
 .env
 .env.old
+/loadtest-parent-tokens.txt
+/.loadtest-parent-tokens-*.tmp
 # Logs
 logs
 *.log

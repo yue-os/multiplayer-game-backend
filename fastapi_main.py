@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import os
 
+from a2wsgi import WSGIMiddleware
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from asgiref.wsgi import WsgiToAsgi
 
-from app.server.app import create_app
+from app.server.app import app as flask_app
 from app.server.routes.admin_users import router as admin_users_router
 from app.server.routes.game_sockets import router as game_sockets_router
 
@@ -50,7 +50,7 @@ app.include_router(admin_users_router)
 
 # Keep the existing Flask REST API available from the same process. The
 # WebSocket routes above must remain registered before this catch-all mount.
-app.mount("/", WsgiToAsgi(create_app()))
+app.mount("/", WSGIMiddleware(flask_app))
 
 
 @app.get("/")

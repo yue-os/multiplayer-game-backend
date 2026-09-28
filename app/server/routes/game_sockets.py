@@ -58,6 +58,7 @@ class LobbySocketHub:
         auth_payload = self._parse_player_token(player_token)
         player_id = auth_payload["player_id"]
         visible_role = self._map_claim_role(auth_payload["role"])
+        profile_pic_version = auth_payload.get("profile_pic_version", "")
 
         await websocket.accept()
 
@@ -87,6 +88,7 @@ class LobbySocketHub:
         if player_state is None:
             player_state = PlayerState(
                 player_id=player_id,
+                profile_pic_version=profile_pic_version,
                 visible_role=visible_role,
                 inventory={
                     ItemType.SNACKS: 1,
@@ -110,6 +112,8 @@ class LobbySocketHub:
                     patient_zero = non_doctor_players[0]  # First non-doctor becomes patient zero
                     patient_zero.is_carrier = True
                     print(f"[Relay] Assigned {patient_zero.player_id} ({patient_zero.visible_role}) as patient zero")
+        else:
+            player_state.profile_pic_version = profile_pic_version
 
         # Save state to Redis and publish update
         GameStateCache.save_state(lobby_id, lobby_runtime.game_state.model_dump())
@@ -479,7 +483,11 @@ class LobbySocketHub:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Token is missing a valid user_id.",
             )
-        return {"player_id": player_id, "role": role}
+        return {
+            "player_id": player_id,
+            "role": role,
+            "profile_pic_version": str(decoded.get("profile_pic_version", "")),
+        }
 
     def _get_lobby_runtime_or_raise(self, lobby_id: str) -> LobbyRuntime:
         runtime = self._lobbies.get(lobby_id)
@@ -534,14 +542,17 @@ class LobbySocketHub:
         return role_map.get(token_role, VisibleRole.STUDENT)
 
     def _public_player_payload(self, player: PlayerState) -> dict[str, Any]:
+        profile_pic_url = ""
+        if player.profile_pic_version:
+            profile_pic_url = f"/user/{player.player_id}/profile-picture?v={player.profile_pic_version}"
         return {
             "player_id": player.player_id,
             "display_name": player.display_name or player.player_id,
             "visible_role": player.visible_role.value,
             "inventory": {item.value: count for item, count in player.inventory.items()},
             "mission_completed": player.mission_completed,
-            "profile_pic_url": f"/user/{player.player_id}/profile-picture",
-            "profile_pic_version": "1"
+            "profile_pic_url": profile_pic_url,
+            "profile_pic_version": player.profile_pic_version,
         }
 
     def _private_player_payload(self, player: PlayerState) -> dict[str, Any]:

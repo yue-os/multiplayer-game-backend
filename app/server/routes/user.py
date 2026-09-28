@@ -1,5 +1,7 @@
 
 import io
+import base64
+import struct
 from datetime import datetime, timezone
 import hashlib
 import secrets
@@ -135,7 +137,11 @@ def login():
         if user.role == 'Student' and user.parent_id is None:
             return jsonify({'error': 'Student account must be linked to a parent to play. Please ask your parent to link your account first.'}), 403
         
-        token = signJWT(str(user.id), user.role)
+        token = signJWT(
+            str(user.id),
+            user.role,
+            {"profile_pic_version": user.to_dict()["profile_pic_version"]},
+        )
         payload = dict(token)
         payload['must_change_password'] = bool(getattr(user, 'must_change_password', False))
         payload['mustChangePassword'] = payload['must_change_password']
@@ -303,17 +309,36 @@ def update_own_profile():
     user.username = username
     user.email = email
     
-    # Handle base64 profile picture
-    if profile_pic_b64:
+    # Profile pictures are normalized to small PNG files by the client.
+    if profile_pic_b64 is not None:
         try:
-            import base64
-            # Decode base64 string to binary
-            user.profile_pic = base64.b64decode(profile_pic_b64)
+            if not isinstance(profile_pic_b64, str):
+                raise ValueError('Profile picture must be a base64 string')
+            if len(profile_pic_b64) > 1_400_000:
+                return jsonify({'error': 'Profile picture must be 1 MB or smaller'}), 413
+            picture_bytes = base64.b64decode(profile_pic_b64, validate=True)
+            if len(picture_bytes) > 1_000_000:
+                return jsonify({'error': 'Profile picture must be 1 MB or smaller'}), 413
+            if len(picture_bytes) < 24 or not picture_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+                return jsonify({'error': 'Profile picture must be a valid 256x256 PNG image'}), 400
+            width, height = struct.unpack('>II', picture_bytes[16:24])
+            if width != 256 or height != 256:
+                return jsonify({'error': 'Profile picture must be 256x256 pixels'}), 400
+            user.profile_pic = picture_bytes
         except Exception as e:
             return jsonify({'error': f'Invalid profile picture format: {str(e)}'}), 400
 
     db.session.commit()
-    return jsonify({'message': 'Profile updated successfully', 'user': user.to_dict()}), 200
+    token = signJWT(
+        str(user.id),
+        user.role,
+        {"profile_pic_version": user.to_dict()["profile_pic_version"]},
+    )
+    return jsonify({
+        'message': 'Profile updated successfully',
+        'user': user.to_dict(),
+        'access_token': token['access_token'],
+    }), 200
 
 
 @user_bp.route('/user/<int:player_id>/profile-picture', methods=['GET'])
@@ -327,12 +352,16 @@ def get_profile_picture(player_id):
         return jsonify({'error': 'Profile picture not found'}), 404
 
     # Send the raw bytes stored in the database directly to the Godot client
-    return send_file(
+    version = user.to_dict()['profile_pic_version']
+    response = send_file(
         io.BytesIO(user.profile_pic),
-        mimetype='image/png', # Godot will figure out the actual format (PNG/JPG/WEBP) from the binary headers
+        mimetype='image/png',
         as_attachment=False,
-        download_name=f"profile_{player_id}.png"
+        download_name=f"profile_{player_id}_{version}.png",
+        max_age=31536000,
     )
+    response.headers['Cache-Control'] = 'private, max-age=31536000, immutable'
+    return response
 
 
 @user_bp.route('/ping', methods=['GET'])
