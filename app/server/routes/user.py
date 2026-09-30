@@ -2,14 +2,14 @@
 import io
 import base64
 import struct
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import secrets
 from flask import Blueprint, request, jsonify, send_file
 from sqlalchemy import func
 from werkzeug.security import generate_password_hash, check_password_hash
 from app.server.database import db
-from app.server.models.user import Class, Message, Mission, MissionProgress, PasswordResetRequest, PlaytimeLog, Quiz, QuizResult, User
+from app.server.models.user import Class, Message, Mission, MissionProgress, PasswordResetRequest, PlaytimeLog, Quiz, QuizResult, StudentRefreshSession, User
 from app.server.models.announcement import Announcement
 from app.auth.auth_handler import signJWT
 from app.auth.auth_bearer import token_required
@@ -20,6 +20,30 @@ from app.cache.notification_cache import NotificationCache
 
 user_bp = Blueprint('user', __name__)
 RESET_ALLOWED_ROLES = {'Student', 'Teacher', 'Parent'}
+STUDENT_REFRESH_SESSION_DAYS = 30
+
+
+def _hash_student_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
+
+
+def _new_student_refresh_token(user_id: int, now: datetime | None = None) -> str:
+    issued_at = now or datetime.utcnow()
+    refresh_token = secrets.token_urlsafe(48)
+    db.session.add(StudentRefreshSession(
+        user_id=user_id,
+        token_hash=_hash_student_refresh_token(refresh_token),
+        expires_at=issued_at + timedelta(days=STUDENT_REFRESH_SESSION_DAYS),
+    ))
+    return refresh_token
+
+
+def _student_access_token(user: User) -> str:
+    return signJWT(
+        str(user.id),
+        user.role,
+        {"profile_pic_version": user.to_dict()["profile_pic_version"]},
+    )["access_token"]
 
 @user_bp.route('/auth/register', methods=['POST'])
 def register():
@@ -137,18 +161,65 @@ def login():
         if user.role == 'Student' and user.parent_id is None:
             return jsonify({'error': 'Student account must be linked to a parent to play. Please ask your parent to link your account first.'}), 403
         
-        token = signJWT(
-            str(user.id),
-            user.role,
-            {"profile_pic_version": user.to_dict()["profile_pic_version"]},
-        )
-        payload = dict(token)
+        payload = {"access_token": _student_access_token(user)}
+        if user.role == 'Student':
+            payload['refresh_token'] = _new_student_refresh_token(user.id)
+            db.session.commit()
         payload['must_change_password'] = bool(getattr(user, 'must_change_password', False))
         payload['mustChangePassword'] = payload['must_change_password']
         payload['user'] = user.to_dict()
         return jsonify(payload), 200
 
     return jsonify({'error': 'Invalid credentials'}), 401
+
+
+@user_bp.route('/auth/refresh', methods=['POST'])
+def refresh_student_session():
+    data = request.get_json(silent=True) or {}
+    refresh_token = str(data.get('refresh_token') or '').strip()
+    if not refresh_token:
+        return jsonify({'error': 'Refresh token is required'}), 400
+
+    session = StudentRefreshSession.query.filter_by(
+        token_hash=_hash_student_refresh_token(refresh_token)
+    ).with_for_update().first()
+    now = datetime.utcnow()
+    if not session:
+        return jsonify({'error': 'Refresh token is invalid or expired'}), 401
+    if session.expires_at <= now:
+        db.session.delete(session)
+        db.session.commit()
+        return jsonify({'error': 'Refresh token is invalid or expired'}), 401
+
+    user = db.session.get(User, session.user_id)
+    if not user or user.role != 'Student' or user.parent_id is None:
+        db.session.delete(session)
+        db.session.commit()
+        return jsonify({'error': 'Student session is no longer valid'}), 401
+
+    db.session.delete(session)
+    next_refresh_token = _new_student_refresh_token(user.id, now)
+    access_token = _student_access_token(user)
+    db.session.commit()
+    return jsonify({
+        'access_token': access_token,
+        'refresh_token': next_refresh_token,
+        'user': user.to_dict(),
+    }), 200
+
+
+@user_bp.route('/auth/logout', methods=['POST'])
+def logout_student_session():
+    data = request.get_json(silent=True) or {}
+    refresh_token = str(data.get('refresh_token') or '').strip()
+    if refresh_token:
+        session = StudentRefreshSession.query.filter_by(
+            token_hash=_hash_student_refresh_token(refresh_token)
+        ).first()
+        if session:
+            db.session.delete(session)
+            db.session.commit()
+    return jsonify({'message': 'Logged out'}), 200
 
 @user_bp.route('/auth/change-password', methods=['POST'])
 @token_required

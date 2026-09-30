@@ -50,6 +50,18 @@ class User(db.Model, TimestampMixin, PublicIdMixin):
             "profile_pic_version": profile_pic_version
         }
 
+class StudentRefreshSession(db.Model):
+    __tablename__ = 'student_refresh_sessions'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    token_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+    user = db.relationship('User', backref=db.backref('student_refresh_sessions', cascade='all, delete-orphan', passive_deletes=True))
+
+
 class Class(db.Model, TimestampMixin, PublicIdMixin):
     __tablename__ = 'classes'
 
