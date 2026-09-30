@@ -15,6 +15,7 @@ from app.server.database import db
 from app.server.models.announcement import Announcement
 from app.server.models.audit_log import AuditLog
 from app.server.models.user import Class, GameServer, Message, MissionProgress, PasswordResetRequest, PlaytimeLog, Quiz, QuizResult, User
+from app.server.password_policy import password_policy_error
 
 
 admin_users_bp = Blueprint("admin_users", __name__)
@@ -193,8 +194,20 @@ def _unique_bulk_username(first_name: str, last_name: str, reserved_usernames: s
 
 
 def _temporary_password() -> str:
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%&*"
-    return "".join(secrets.choice(alphabet) for _ in range(12))
+    uppercase = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+    lowercase = "abcdefghijkmnopqrstuvwxyz"
+    digits = "23456789"
+    special = "!@#$%&*"
+    alphabet = uppercase + lowercase + digits + special
+    password = [
+        secrets.choice(uppercase),
+        secrets.choice(lowercase),
+        secrets.choice(digits),
+        secrets.choice(special),
+        *(secrets.choice(alphabet) for _ in range(8)),
+    ]
+    secrets.SystemRandom().shuffle(password)
+    return "".join(password)
 
 
 def _valid_email(value: str) -> bool:
@@ -505,6 +518,10 @@ def create_user():
     if not password:
         password = _temporary_password()
         generated_password = True
+    else:
+        password_error = password_policy_error(password)
+        if password_error:
+            return jsonify({"error": password_error}), 400
 
     if User.query.filter((User.username == username) | (User.email == email)).first():
         return jsonify({"error": "User already exists"}), 409
@@ -713,6 +730,11 @@ def update_user(user_id: int):
 
     if not first_name or not last_name or not username or not email or role not in ALLOWED_ROLES:
         return jsonify({"error": "Invalid payload"}), 400
+
+    if password:
+        password_error = password_policy_error(password)
+        if password_error:
+            return jsonify({"error": password_error}), 400
 
     conflict = User.query.filter(
         ((User.username == username) | (User.email == email)) & (User.id != user.id)

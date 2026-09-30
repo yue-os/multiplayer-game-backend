@@ -16,6 +16,7 @@ from app.auth.auth_bearer import token_required
 
 from app.server.services.email_service import send_otp_email, send_otp_email_async, send_password_reset_email_async
 from app.server.services.parent_link_codes import issue_parent_link_code
+from app.server.password_policy import password_policy_error
 from app.cache.session_cache import RegistrationCache
 from app.cache.notification_cache import NotificationCache
 from app.server.utils import get_configured_base_url
@@ -61,11 +62,15 @@ def register():
     last_name = (data.get('last_name') or '').strip()
     username = data.get('username')
     email = data.get('email', 'test@gmail.com') # Default email for testing
-    password = data.get('password')
+    password = str(data.get('password') or '')
     role = data.get('role', 'Student') # Default to Student
 
     if not first_name or not last_name or not username or not email or not password:
         return jsonify({'error': 'Missing required fields'}), 400
+
+    password_error = password_policy_error(password)
+    if password_error:
+        return jsonify({'error': password_error}), 400
 
     if User.query.filter((User.username == username) | (User.email == email)).first():
         return jsonify({'error': 'User already exists'}), 400
@@ -249,6 +254,10 @@ def change_password():
 
     if not check_password_hash(user.password_hash, current_password):
         return jsonify({'error': 'Incorrect current password'}), 403
+
+    password_error = password_policy_error(str(new_password))
+    if password_error:
+        return jsonify({'error': password_error}), 400
 
     user.password_hash = generate_password_hash(new_password)
     user.must_change_password = False
@@ -450,9 +459,10 @@ def complete_password_reset():
     token = str(data.get('token') or '').strip()
     new_password = str(data.get('new_password') or '')
 
-    if not token or len(new_password) < 8:
+    password_error = password_policy_error(new_password)
+    if not token or password_error:
         return _password_reset_response({
-            'error': 'A valid reset token and a password of at least 8 characters are required'
+            'error': 'A valid reset token is required.' if not token else password_error
         }, 400)
 
     token_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()
