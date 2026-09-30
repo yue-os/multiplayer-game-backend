@@ -4,14 +4,90 @@ import os
 
 from a2wsgi import WSGIMiddleware
 from fastapi import FastAPI
+from fastapi import Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.auth.auth_handler import decodeJWT
+from app.server.audit import audit_context, classify_read, classify_request_action, record_activity
 from app.server.app import app as flask_app
 from app.server.routes.admin_users import router as admin_users_router
 from app.server.routes.game_sockets import router as game_sockets_router
 
 
 app = FastAPI(title="BatangAware Realtime Backend", version="0.1.0")
+
+
+@app.middleware("http")
+async def audit_fastapi_activity(request: Request, call_next):
+    path = request.url.path
+    # Flask installs its own hooks for its mounted routes. These FastAPI paths
+    # handle their own audit context here, including ORM changes in the admin API.
+    if not (path.startswith("/api/admin/users") or path == "/ws/lobby/list"):
+        return await call_next(request)
+
+    payload = None
+    authorization = request.headers.get("Authorization", "")
+    if authorization.startswith("Bearer "):
+        payload = decodeJWT(authorization.removeprefix("Bearer ").strip())
+
+    actor_id = None
+    actor_role = "Anonymous"
+    if payload:
+        try:
+            actor_id = int(payload.get("user_id"))
+        except (TypeError, ValueError):
+            actor_id = None
+        actor_role = payload.get("role") or "Anonymous"
+
+    context = {
+        "user_id": actor_id,
+        "user_role": actor_role,
+        "request_method": request.method,
+        "request_path": path,
+        "ip_address": request.client.host if request.client else None,
+        "tracked_changes": 0,
+    }
+    context_token = audit_context.set(context)
+    try:
+        response = await call_next(request)
+        if response.status_code < 400:
+            event_data = None
+            if request.method == "GET" and actor_id is not None:
+                read_data = classify_read(path)
+                if read_data:
+                    entity_type, action = read_data
+                    event_data = ("read", action, entity_type, None)
+            elif context.get("tracked_changes", 0) == 0:
+                event_data = classify_request_action(request.method, path)
+
+            if event_data:
+                action_type, action, entity_type, entity_id = event_data
+                try:
+                    with flask_app.app_context():
+                        record_activity(
+                            user_id=actor_id,
+                            user_role=actor_role,
+                            action_type=action_type,
+                            action=action,
+                            entity_type=entity_type,
+                            entity_id=entity_id,
+                            request_method=request.method,
+                            request_path=path,
+                            ip_address=context.get("ip_address"),
+                        )
+                        from app.server.database import db
+
+                        db.session.commit()
+                        db.session.remove()
+                except Exception:
+                    from app.server.database import db
+
+                    db.session.rollback()
+                    db.session.remove()
+                    flask_app.logger.exception("Unable to persist FastAPI activity audit record")
+        return response
+    finally:
+        audit_context.reset(context_token)
 
 lan_origin_regex = r"https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?"
 

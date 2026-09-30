@@ -3,20 +3,98 @@ from __future__ import annotations
 import time
 import re
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, jsonify, request
-from sqlalchemy import case, func
+from sqlalchemy import String, case, cast, func, or_
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.security import generate_password_hash
 
 from app.auth.auth_bearer import token_required
 from app.server.database import db
 from app.server.models.announcement import Announcement
+from app.server.models.audit_log import AuditLog
 from app.server.models.user import Class, GameServer, Message, MissionProgress, PasswordResetRequest, PlaytimeLog, Quiz, QuizResult, User
 
 
 admin_users_bp = Blueprint("admin_users", __name__)
+
+
+def _parse_audit_datetime(value: str | None, field_name: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"Invalid {field_name} date. Use an ISO 8601 date or timestamp.") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _serialize_audit_log(entry: AuditLog) -> dict[str, object]:
+    timestamp = entry.timestamp
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return {
+        "id": entry.id,
+        "timestamp": timestamp.isoformat().replace("+00:00", "Z"),
+        "user_id": entry.user_id,
+        "user_role": entry.user_role,
+        "action_type": entry.action_type,
+        "action": entry.action,
+        "entity_type": entry.entity_type,
+        "entity_id": entry.entity_id,
+        "request_method": entry.request_method,
+        "request_path": entry.request_path,
+        "ip_address": entry.ip_address,
+    }
+
+
+@admin_users_bp.route("/api/admin/activity-logs", methods=["GET"])
+@token_required
+def list_activity_logs():
+    if request.current_user_role != "Admin":
+        return jsonify({"error": "Admin access is required."}), 403
+
+    try:
+        limit = min(100, max(1, int(request.args.get("limit", 50))))
+        offset = max(0, int(request.args.get("offset", 0)))
+        start = _parse_audit_datetime(request.args.get("from"), "from")
+        end = _parse_audit_datetime(request.args.get("to"), "to")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    query = AuditLog.query
+    role = request.args.get("role", "").strip()
+    action_type = request.args.get("action_type", "").strip().lower()
+    search = request.args.get("search", "").strip()[:120]
+
+    if role:
+        query = query.filter(AuditLog.user_role == role)
+    if action_type:
+        query = query.filter(AuditLog.action_type == action_type)
+    if start:
+        query = query.filter(AuditLog.timestamp >= start)
+    if end:
+        query = query.filter(AuditLog.timestamp <= end)
+    if search:
+        term = f"%{search}%"
+        query = query.filter(or_(
+            AuditLog.action.ilike(term),
+            AuditLog.entity_type.ilike(term),
+            AuditLog.entity_id.ilike(term),
+            AuditLog.user_role.ilike(term),
+            AuditLog.request_path.ilike(term),
+            cast(AuditLog.user_id, String).ilike(term),
+        ))
+
+    total = query.count()
+    entries = query.order_by(AuditLog.timestamp.desc(), AuditLog.id.desc()).offset(offset).limit(limit).all()
+    return jsonify({
+        "logs": [_serialize_audit_log(entry) for entry in entries],
+        "pagination": {"limit": limit, "offset": offset, "total": total},
+    }), 200
 
 ALLOWED_ROLES = {"Admin", "Teacher", "Parent", "Student"}
 ROLE_BY_LOWER = {role.lower(): role for role in ALLOWED_ROLES}

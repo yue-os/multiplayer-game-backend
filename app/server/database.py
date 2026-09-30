@@ -317,7 +317,7 @@ def init_db(app):
     with app.app_context():
         # Explicitly import models to ensure they are registered with SQLAlchemy 
         # before we attempt to create the tables.
-        from app.server.models import user
+        from app.server.models import user, audit_log
 
         try:
             # Create tables if they don't exist

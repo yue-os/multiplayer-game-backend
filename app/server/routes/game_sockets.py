@@ -53,6 +53,7 @@ class LobbySocketHub:
     def __init__(self) -> None:
         self._connections: dict[str, dict[str, WebSocket]] = {}
         self._lobbies: dict[str, LobbyRuntime] = {}
+        self._lobby_actor_roles: dict[str, dict[str, str]] = {}
 
     async def connect_to_lobby(self, lobby_id: str, player_token: str, websocket: WebSocket) -> str:
         auth_payload = self._parse_player_token(player_token)
@@ -64,6 +65,7 @@ class LobbySocketHub:
 
         lobby_connections = self._connections.setdefault(lobby_id, {})
         lobby_connections[player_id] = websocket
+        self._lobby_actor_roles.setdefault(lobby_id, {})[player_id] = auth_payload["role"]
 
         lobby_runtime = self._lobbies.get(lobby_id)
         if lobby_runtime is None:
@@ -280,6 +282,34 @@ class LobbySocketHub:
         runtime.round_started_at = time.monotonic()
         runtime.timer_task = asyncio.create_task(self.start_event_timer(lobby_id))
 
+        try:
+            from app.server.app import app as flask_app
+            from app.server.audit import record_activity
+            from app.server.database import db
+
+            with flask_app.app_context():
+                record_activity(
+                    user_id=int(player_id),
+                    user_role=self._lobby_actor_roles.get(lobby_id, {}).get(player_id, "Student"),
+                    action_type="update",
+                    action="Started game lobby",
+                    entity_type="game lobby",
+                    entity_id=lobby_id,
+                    request_method="WEBSOCKET",
+                    request_path=f"/ws/lobby/{lobby_id}",
+                )
+                db.session.commit()
+                db.session.remove()
+        except Exception as exc:
+            try:
+                from app.server.database import db
+
+                db.session.rollback()
+                db.session.remove()
+            except Exception:
+                pass
+            print(f"[Audit] Unable to record lobby start: {exc}")
+
         redis_client = get_async_redis()
         if redis_client:
             await redis_client.publish(f"lobby:{lobby_id}:events", "start")
@@ -460,6 +490,7 @@ class LobbySocketHub:
             if runtime.subscription_task is not None:
                 runtime.subscription_task.cancel()
         self._connections.pop(lobby_id, None)
+        self._lobby_actor_roles.pop(lobby_id, None)
 
     def _parse_player_token(self, player_token: str) -> dict[str, str]:
         if player_token.strip() == "":

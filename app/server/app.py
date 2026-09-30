@@ -6,7 +6,7 @@ import logging
 
 load_dotenv()
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 from app.server.database import init_db
@@ -17,6 +17,8 @@ from app.server.routes.parent import parent_bp
 from app.server.routes.docs import docs_bp
 from app.server.routes.admin_users_flask import admin_users_bp
 from app.server.discord_logger import DiscordWebhookHandler
+from app.auth.auth_handler import decodeJWT
+from app.server.audit import audit_context, classify_read, classify_request_action, record_activity
 
 LAN_ORIGIN_REGEX = r"https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?"
 LAN_ORIGIN_PATTERN = re.compile(f"^{LAN_ORIGIN_REGEX}$")
@@ -116,6 +118,82 @@ def create_app():
                     request.remote_addr,
                     {k: v for k, v in request.headers.items() if k.lower() not in ("content-type", "user-agent", "authorization")},
                     body)
+
+    @app.before_request
+    def start_audit_context():
+        payload = None
+        authorization = request.headers.get("Authorization", "")
+        if authorization.startswith("Bearer "):
+            payload = decodeJWT(authorization.removeprefix("Bearer ").strip())
+
+        actor_id = None
+        actor_role = "Anonymous"
+        if payload:
+            try:
+                actor_id = int(payload.get("user_id"))
+            except (TypeError, ValueError):
+                actor_id = None
+            actor_role = payload.get("role") or "Anonymous"
+
+        g.audit_user_id = actor_id
+        g.audit_user_role = actor_role
+        context = {
+            "user_id": actor_id,
+            "user_role": actor_role,
+            "request_method": request.method,
+            "request_path": request.path,
+            "ip_address": request.remote_addr,
+            "tracked_changes": 0,
+        }
+        g.audit_context_token = audit_context.set(context)
+
+    @app.after_request
+    def record_http_activity(response):
+        context = audit_context.get()
+        if context is None or response.status_code >= 400:
+            token = getattr(g, "audit_context_token", None)
+            if token is not None:
+                audit_context.reset(token)
+            return response
+
+        event_data = None
+        if request.method == "GET" and context.get("user_id") is not None:
+            event_data = classify_read(request.path)
+            if event_data:
+                entity_type, action = event_data
+                action_type = "read"
+                entity_id = None
+        elif context.get("tracked_changes", 0) == 0:
+            event_data = classify_request_action(request.method, request.path)
+            if event_data:
+                action_type, action, entity_type, entity_id = event_data
+
+        if event_data:
+            try:
+                record_activity(
+                    user_id=context.get("user_id"),
+                    user_role=context.get("user_role") or "Anonymous",
+                    action_type=action_type,
+                    action=action,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    request_method=request.method,
+                    request_path=request.path,
+                    ip_address=request.remote_addr,
+                )
+                from app.server.database import db
+
+                db.session.commit()
+            except Exception:
+                from app.server.database import db
+
+                db.session.rollback()
+                app.logger.exception("Unable to persist request activity audit record")
+
+        token = getattr(g, "audit_context_token", None)
+        if token is not None:
+            audit_context.reset(token)
+        return response
 
     @app.route("/health", methods=["GET"])
     def health_check():
