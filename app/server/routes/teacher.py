@@ -20,6 +20,7 @@ from app.server.models.user import (
     User,
 )
 from app.server.models.announcement import Announcement
+from app.server.services.parent_link_codes import issue_parent_link_code
 
 teacher_bp = Blueprint('teacher', __name__)
 
@@ -553,6 +554,27 @@ def student_summary(student_public_id: str):
             'playtime_logs': playtime_logs,
         }
     ), 200
+
+
+@teacher_bp.route('/teacher/student/<string:student_public_id>/parent-link-code', methods=['POST'])
+@token_required
+def create_teacher_parent_link_code(student_public_id: str):
+    guard = _teacher_guard()
+    if guard:
+        return guard
+
+    teacher_id = int(request.current_user_id)
+    student = User.query.filter_by(public_id=student_public_id, role='Student').first()
+    if not student:
+        return jsonify({'error': 'Student not found.'}), 404
+    if not Class.query.filter_by(id=student.class_id, teacher_id=teacher_id).first():
+        return jsonify({'error': 'Student is not in your class.'}), 403
+    if student.parent_id is not None:
+        return jsonify({'error': 'This student is already linked to a parent.'}), 409
+
+    issued_code = issue_parent_link_code(student)
+    db.session.commit()
+    return jsonify(issued_code), 201
 
 
 @teacher_bp.route('/teacher/quiz', methods=['POST'])

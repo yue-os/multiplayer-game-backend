@@ -23,6 +23,12 @@ class User(db.Model, TimestampMixin, PublicIdMixin):
     parent_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
     children = db.relationship('User', backref=db.backref('parent', remote_side=[id]), lazy=True)
 
+    # Parent link codes are short-lived secrets. Only a keyed hash is stored.
+    parent_link_code_hash = db.Column(db.String(64), nullable=True, unique=True, index=True)
+    parent_link_code_expires_at = db.Column(db.DateTime, nullable=True, index=True)
+    parent_link_attempt_count = db.Column(db.Integer, nullable=False, default=0)
+    parent_link_attempt_window_started_at = db.Column(db.DateTime, nullable=True)
+
     # Relationship: Student -> Class (Many Students in one Class)
     class_id = db.Column(db.Integer, db.ForeignKey('classes.id'), nullable=True)
 

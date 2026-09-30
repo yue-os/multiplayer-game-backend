@@ -105,6 +105,33 @@ def _ensure_user_name_columns(app, inspector):
         db.session.commit()
 
 
+def _ensure_parent_link_code_columns(app, inspector):
+    if not inspector.has_table('users'):
+        return
+
+    columns = {col['name'] for col in inspector.get_columns('users')}
+    if 'parent_link_code_hash' not in columns:
+        db.session.execute(text("ALTER TABLE users ADD COLUMN parent_link_code_hash VARCHAR(64)"))
+    if 'parent_link_code_expires_at' not in columns:
+        db.session.execute(text("ALTER TABLE users ADD COLUMN parent_link_code_expires_at TIMESTAMP"))
+    if 'parent_link_attempt_count' not in columns:
+        db.session.execute(text("ALTER TABLE users ADD COLUMN parent_link_attempt_count INTEGER NOT NULL DEFAULT 0"))
+    if 'parent_link_attempt_window_started_at' not in columns:
+        db.session.execute(text("ALTER TABLE users ADD COLUMN parent_link_attempt_window_started_at TIMESTAMP"))
+    db.session.commit()
+
+    indexes = {index['name'] for index in inspect(db.engine).get_indexes('users')}
+    if 'ix_users_parent_link_code_hash' not in indexes:
+        db.session.execute(text(
+            "CREATE UNIQUE INDEX ix_users_parent_link_code_hash ON users (parent_link_code_hash)"
+        ))
+    if 'ix_users_parent_link_code_expires_at' not in indexes:
+        db.session.execute(text(
+            "CREATE INDEX ix_users_parent_link_code_expires_at ON users (parent_link_code_expires_at)"
+        ))
+    db.session.commit()
+
+
 def _ensure_game_server_columns(app, inspector):
     if not inspector.has_table('game_servers'):
         return
@@ -299,6 +326,7 @@ def init_db(app):
             # Reuse one inspector instance to save time
             inspector = inspect(db.engine)
             _ensure_user_name_columns(app, inspector)
+            _ensure_parent_link_code_columns(app, inspector)
             _ensure_game_server_columns(app, inspector)
             _ensure_quiz_columns(app, inspector)
             _ensure_announcement_columns(app, inspector)

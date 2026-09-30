@@ -19,6 +19,14 @@ def token_required(f):
         if not payload:
             return jsonify({'message': 'Token is invalid or expired!'}), 401
 
+        if payload.get('parent_link_only') and request.path not in {
+            '/student/parent-link-code',
+            '/auth/change-password',
+        }:
+            return jsonify({
+                'error': 'This student account is waiting for a parent connection. Generate a code or change the account password.'
+            }), 403
+
         # Inject current_user_id and role into kwargs or request context
         # Here we attach it to the request object for easy access in routes
         request.current_user_id = payload['user_id']

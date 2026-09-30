@@ -475,6 +475,11 @@ class LobbySocketHub:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or expired player token.",
             )
+        if decoded.get("parent_link_only"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Connect a parent account before joining a game.",
+            )
 
         player_id = str(decoded["user_id"]).strip()
         role = str(decoded.get("role", "Student")).strip()

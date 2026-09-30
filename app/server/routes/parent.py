@@ -1,8 +1,19 @@
+import re
+from datetime import datetime
 from flask import Blueprint, jsonify, request
 from sqlalchemy import func, or_
 from app.auth.auth_bearer import token_required
 from app.server.database import db
 from app.server.models.user import Class, User, Message, QuizResult, Quiz, MissionProgress, PlaytimeLog
+from app.server.services.parent_link_codes import (
+    PARENT_LINK_CODE_ALPHABET,
+    PARENT_LINK_CODE_LENGTH,
+    PARENT_LINK_ATTEMPT_WINDOW,
+    consume_parent_link_attempt,
+    clear_parent_link_attempts,
+    hash_parent_link_code,
+    issue_parent_link_code,
+)
 
 parent_bp = Blueprint('parent', __name__)
 
@@ -333,45 +344,51 @@ def get_parent_stats():
 @parent_bp.route('/parent/link_child', methods=['POST'])
 @token_required
 def link_child():
-    """
-    Link a student to parent by student username.
-    Parent claims a child account.
-    """
     guard = _parent_guard()
     if guard:
         return guard
 
     parent_id = int(request.current_user_id)
+    if not consume_parent_link_attempt(parent_id):
+        return jsonify({
+            'error': 'Too many connection-code attempts. Wait for the 15-minute attempt window to reset.'
+        }), 429
+
     data = request.get_json(silent=True) or {}
-    child_username = (data.get('child_username') or data.get('child_identifier') or '').strip()
-    
-    if not child_username:
-        return jsonify({'error': 'child_username is required'}), 400
-    
-    lowered_identifier = child_username.lower()
-    full_name = func.lower(func.trim(User.first_name + ' ' + User.last_name))
-    student = User.query.filter(
-        User.role == 'Student',
-        or_(
-            func.lower(User.username) == lowered_identifier,
-            func.lower(User.email) == lowered_identifier,
-            func.lower(User.public_id) == lowered_identifier,
-            full_name == lowered_identifier,
-        ),
-    ).first()
-    if not student:
-        return jsonify({'error': 'Student not found. Enter the student username, email, public ID, or full name.'}), 404
-    
-    # Check if already linked to another parent
-    if student.parent_id and student.parent_id != parent_id:
-        return jsonify({'error': 'This student is already linked to another parent'}), 400
-    
-    # Link the student to parent
-    student.parent_id = parent_id
+    code = re.sub(r'[\s-]', '', str(data.get('connection_code') or '')).upper()
+    if len(code) != PARENT_LINK_CODE_LENGTH or any(char not in PARENT_LINK_CODE_ALPHABET for char in code):
+        return jsonify({'error': 'Enter a valid student connection code.'}), 400
+
+    code_hash = hash_parent_link_code(code)
+    now = datetime.utcnow()
+    student = User.query.filter_by(role='Student', parent_link_code_hash=code_hash).first()
+    if not student or not student.parent_link_code_expires_at or student.parent_link_code_expires_at <= now:
+        return jsonify({'error': 'This connection code is invalid, expired, or already used.'}), 400
+    if student.parent_id is not None:
+        return jsonify({'error': 'This student is already linked to a parent.'}), 409
+
+    # The conditional update makes redemption one-use even if two parents submit at once.
+    updated = User.query.filter_by(
+        id=student.id,
+        role='Student',
+        parent_id=None,
+        parent_link_code_hash=code_hash,
+    ).filter(User.parent_link_code_expires_at > now).update(
+        {
+            User.parent_id: parent_id,
+            User.parent_link_code_hash: None,
+            User.parent_link_code_expires_at: None,
+        },
+        synchronize_session=False,
+    )
+    if updated != 1:
+        db.session.rollback()
+        return jsonify({'error': 'This connection code is invalid, expired, or already used.'}), 400
+    clear_parent_link_attempts(parent_id)
     db.session.commit()
     
     return jsonify({
-        'message': f'Successfully linked {child_username}',
+        'message': 'Student linked successfully.',
         'child': {
             'username': student.username,
             'first_name': student.first_name,
@@ -422,59 +439,26 @@ def unlink_child():
 
 @parent_bp.route('/parent/request-link', methods=['POST'])
 def request_parent_link():
-    """
-    Public endpoint for students to request linking to a parent.
-    Does not require authentication so students can request linking before being allowed to log in
-    (since students need a parent link to log in).
-    """
-    data = request.get_json(silent=True) or {}
-    child_username = (data.get('child_username') or '').strip()
-    parent_username = (data.get('parent_username') or '').strip()
-    message_content = (data.get('message') or data.get('content') or '').strip()
-
-    if not child_username or not parent_username:
-        return jsonify({'error': 'Both child_username and parent_username are required'}), 400
-
-    # Find the child
-    student = User.query.filter_by(username=child_username, role='Student').first()
-    if not student:
-        return jsonify({'error': 'Student account not found'}), 404
-
-    # Find the parent
-    parent = User.query.filter_by(username=parent_username, role='Parent').first()
-    if not parent:
-        return jsonify({'error': 'Parent account not found. Please check the username.'}), 404
-
-    # Check if already linked
-    if student.parent_id:
-        if student.parent_id == parent.id:
-            return jsonify({'message': 'You are already linked to this parent.'}), 200
-        else:
-            return jsonify({'error': 'You are already linked to another parent.'}), 400
-
-    # Create a message/request for the parent
-    sender_display_name = _user_display_name(student)
-    
-    # We use a special format that the parent dashboard can easily see
-    # and we set student_name/class_name to ensure it shows up correctly in the feedback list
-    request_msg = Message(
-        sender_id=student.id,
-        receiver_id=parent.id,
-        sender_name=sender_display_name,
-        sender_role='Student',
-        content=message_content if message_content else f"I would like to link my student account ({child_username}) to your parent account.",
-        student_name=sender_display_name,
-        class_name="Linking Request", # Used as a label in the feedback list
-    )
-    
-    db.session.add(request_msg)
-    db.session.commit()
-
     return jsonify({
-        'message': 'Linking request sent successfully! Please wait for your parent to approve it from their dashboard.',
-        'request_id': request_msg.id
-    }), 201
+        'error': 'Username-based linking is disabled. Use a student connection code in the parent dashboard.'
+    }), 410
 
+
+@parent_bp.route('/student/parent-link-code', methods=['POST'])
+@token_required
+def create_student_parent_link_code():
+    if request.current_user_role != 'Student':
+        return jsonify({'error': 'Only student accounts can create their own connection code.'}), 403
+
+    student = User.query.get(int(request.current_user_id))
+    if not student:
+        return jsonify({'error': 'Student account not found.'}), 404
+    if student.parent_id is not None:
+        return jsonify({'error': 'This student is already linked to a parent.'}), 409
+
+    issued_code = issue_parent_link_code(student)
+    db.session.commit()
+    return jsonify(issued_code), 201
 
 @parent_bp.route('/parent/message/<int:message_id>', methods=['DELETE'])
 @token_required

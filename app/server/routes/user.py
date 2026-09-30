@@ -15,6 +15,7 @@ from app.auth.auth_handler import signJWT
 from app.auth.auth_bearer import token_required
 
 from app.server.services.email_service import send_otp_email, send_otp_email_async
+from app.server.services.parent_link_codes import issue_parent_link_code
 from app.cache.session_cache import RegistrationCache
 from app.cache.notification_cache import NotificationCache
 
@@ -42,7 +43,10 @@ def _student_access_token(user: User) -> str:
     return signJWT(
         str(user.id),
         user.role,
-        {"profile_pic_version": user.to_dict()["profile_pic_version"]},
+        {
+            "profile_pic_version": user.to_dict()["profile_pic_version"],
+            "parent_link_only": user.role == 'Student' and user.parent_id is None,
+        },
     )["access_token"]
 
 @user_bp.route('/auth/register', methods=['POST'])
@@ -127,6 +131,7 @@ def verify_otp():
         password_hash=pending['password_hash'],
         role=pending['role'],
     )
+    initial_parent_link_code = issue_parent_link_code(new_user) if new_user.role == 'Student' else None
 
     try:
         db.session.add(new_user)
@@ -138,7 +143,11 @@ def verify_otp():
 
     RegistrationCache.delete_pending(email)
 
-    return jsonify({'message': 'User registered successfully'}), 201
+    response = {'message': 'User registered successfully'}
+    if initial_parent_link_code:
+        response['connection_code'] = initial_parent_link_code['connection_code']
+        response['connection_code_expires_at'] = initial_parent_link_code['expires_at']
+    return jsonify(response), 201
 
 @user_bp.route('/auth/login', methods=['POST'])
 def login():
@@ -157,10 +166,6 @@ def login():
             password_matches = False
 
     if user and password_matches:
-        # Check if student is connected to a parent
-        if user.role == 'Student' and user.parent_id is None:
-            return jsonify({'error': 'Student account must be linked to a parent to play. Please ask your parent to link your account first.'}), 403
-        
         payload = {"access_token": _student_access_token(user)}
         if user.role == 'Student':
             payload['refresh_token'] = _new_student_refresh_token(user.id)
@@ -192,7 +197,7 @@ def refresh_student_session():
         return jsonify({'error': 'Refresh token is invalid or expired'}), 401
 
     user = db.session.get(User, session.user_id)
-    if not user or user.role != 'Student' or user.parent_id is None:
+    if not user or user.role != 'Student':
         db.session.delete(session)
         db.session.commit()
         return jsonify({'error': 'Student session is no longer valid'}), 401

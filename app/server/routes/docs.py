@@ -89,7 +89,7 @@ def _openapi_spec(base_url: str):
             '/parent/link_child': {
                 'post': {
                     'tags': ['Parent'],
-                    'summary': 'Link a child account to parent',
+                    'summary': 'Link a student using a short-lived connection code',
                     'security': [{'BearerAuth': []}],
                     'requestBody': {
                         'required': True,
@@ -97,13 +97,36 @@ def _openapi_spec(base_url: str):
                             'application/json': {
                                 'schema': {
                                     'type': 'object',
-                                    'required': ['child_username'],
-                                    'properties': {'child_username': {'type': 'string'}},
+                                    'required': ['connection_code'],
+                                    'properties': {
+                                        'connection_code': {
+                                            'type': 'string',
+                                            'minLength': 10,
+                                            'maxLength': 10,
+                                            'description': '10-character, one-use student code that expires after 24 hours.',
+                                        },
+                                    },
                                 }
                             }
                         },
                     },
-                    'responses': {'200': {'description': 'Linked'}, '403': {'description': 'Unauthorized'}},
+                    'responses': {
+                        '201': {'description': 'Linked'},
+                        '400': {'description': 'Invalid, expired, or already used code'},
+                        '429': {'description': 'Too many code attempts; wait for the 15-minute attempt window to reset'},
+                        '403': {'description': 'Unauthorized'},
+                    },
+                }
+            },
+            '/student/parent-link-code': {
+                'post': {
+                    'tags': ['Student'],
+                    'summary': 'Generate or renew the student parent connection code',
+                    'security': [{'BearerAuth': []}],
+                    'responses': {
+                        '201': {'description': 'Returns the one-time code and expiry time'},
+                        '403': {'description': 'Student account is already linked or unauthorized'},
+                    },
                 }
             },
             '/parent/stats': {
@@ -132,6 +155,23 @@ def _openapi_spec(base_url: str):
                         },
                     },
                     'responses': {'200': {'description': 'Unlinked'}, '403': {'description': 'Unauthorized'}},
+                }
+            },
+            '/teacher/student/{student_public_id}/parent-link-code': {
+                'post': {
+                    'tags': ['Teacher'],
+                    'summary': 'Generate or renew a parent connection code for a student in the teacher\'s class',
+                    'security': [{'BearerAuth': []}],
+                    'parameters': [{
+                        'name': 'student_public_id',
+                        'in': 'path',
+                        'required': True,
+                        'schema': {'type': 'string'},
+                    }],
+                    'responses': {
+                        '201': {'description': 'Returns the one-time code and expiry time'},
+                        '403': {'description': 'Unauthorized or student is not in the teacher\'s class'},
+                    },
                 }
             },
             '/server/register': {
