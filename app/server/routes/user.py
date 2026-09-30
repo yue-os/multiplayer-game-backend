@@ -5,7 +5,7 @@ import struct
 from datetime import datetime, timedelta, timezone
 import hashlib
 import secrets
-from flask import Blueprint, request, jsonify, send_file
+from flask import Blueprint, current_app, request, jsonify, send_file
 from sqlalchemy import func
 from werkzeug.security import generate_password_hash, check_password_hash
 from app.server.database import db
@@ -14,14 +14,19 @@ from app.server.models.announcement import Announcement
 from app.auth.auth_handler import signJWT
 from app.auth.auth_bearer import token_required
 
-from app.server.services.email_service import send_otp_email, send_otp_email_async
+from app.server.services.email_service import send_otp_email, send_otp_email_async, send_password_reset_email_async
 from app.server.services.parent_link_codes import issue_parent_link_code
 from app.cache.session_cache import RegistrationCache
 from app.cache.notification_cache import NotificationCache
+from app.server.utils import get_configured_base_url
 
 user_bp = Blueprint('user', __name__)
 RESET_ALLOWED_ROLES = {'Student', 'Teacher', 'Parent'}
 STUDENT_REFRESH_SESSION_DAYS = 30
+PASSWORD_RESET_TOKEN_TTL_MINUTES = 30
+PASSWORD_RESET_REQUEST_LIMIT = 3
+PASSWORD_RESET_REQUEST_WINDOW_MINUTES = 15
+ACTIVE_PASSWORD_RESET_STATUSES = ('Queued', 'Sent', 'Approved')
 
 
 def _hash_student_refresh_token(token: str) -> str:
@@ -256,59 +261,187 @@ def change_password():
     }), 200
 
 
+def _password_reset_message() -> str:
+    return 'If an account matches, a password reset link will be emailed. The link expires in 30 minutes.'
+
+
+def _password_reset_response(payload: dict, status: int):
+    response = jsonify(payload)
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    return response, status
+
+
+def _password_reset_link(token: str) -> str:
+    base_url = get_configured_base_url('PASSWORD_RESET_BASE_URL', default_port=5173)
+    # A fragment keeps the bearer token out of web-server requests and Referer headers.
+    return f'{base_url}/reset-password#token={token}'
+
+
+def _password_reset_email_callback(request_id: int):
+    app = current_app._get_current_object()
+
+    def record_delivery(delivered: bool) -> None:
+        with app.app_context():
+            reset_request = PasswordResetRequest.query.get(request_id)
+            if not reset_request:
+                return
+
+            now = datetime.utcnow()
+            if delivered:
+                if reset_request.status == 'Queued':
+                    reset_request.status = 'Sent'
+                reset_request.email_sent_at = now
+                reset_request.activity_log = (reset_request.activity_log or []) + [{
+                    'event': 'reset_email_sent',
+                    'at': now.isoformat(),
+                }]
+            elif reset_request.status == 'Queued':
+                reset_request.status = 'DeliveryFailed'
+                reset_request.token_hash = None
+                reset_request.token_expires_at = None
+                reset_request.activity_log = (reset_request.activity_log or []) + [{
+                    'event': 'reset_email_delivery_failed',
+                    'at': now.isoformat(),
+                }]
+            db.session.commit()
+
+    return record_delivery
+
 @user_bp.route('/auth/forgot-password', methods=['POST'])
 def forgot_password():
     data = request.get_json(silent=True) or {}
     email = str(data.get('email') or '').strip().lower()
-    role = str(data.get('role') or '').strip()
+    requested_role = str(data.get('role') or '').strip()
 
-    if not email:
-        return jsonify({'error': 'Email is required'}), 400
+    if not email or len(email) > 120:
+        return jsonify({'error': 'A valid email address is required'}), 400
 
-    if role not in RESET_ALLOWED_ROLES:
-        matched_user = User.query.filter(func.lower(User.email) == email).first()
-        role = matched_user.role if matched_user and matched_user.role in RESET_ALLOWED_ROLES else 'Student'
+    if requested_role in RESET_ALLOWED_ROLES:
+        role = requested_role
+        user = User.query.filter(func.lower(User.email) == email, User.role == role).first()
+    else:
+        matching_users = (
+            User.query
+            .filter(func.lower(User.email) == email, User.role.in_(RESET_ALLOWED_ROLES))
+            .limit(2)
+            .all()
+        )
+        user = matching_users[0] if len(matching_users) == 1 else None
+        role = user.role if user else 'Student'
 
-    user = User.query.filter(func.lower(User.email) == email, User.role == role).first()
+    now = datetime.utcnow()
+    request_window_start = now - timedelta(minutes=PASSWORD_RESET_REQUEST_WINDOW_MINUTES)
+    recent_request_count = (
+        PasswordResetRequest.query
+        .filter(func.lower(PasswordResetRequest.email) == email)
+        .filter(PasswordResetRequest.created_at >= request_window_start)
+        .count()
+    )
+    if recent_request_count >= PASSWORD_RESET_REQUEST_LIMIT:
+        return _password_reset_response({'message': _password_reset_message()}, 202)
+
+    reset_token = secrets.token_urlsafe(32) if user else None
+    if user:
+        # A new request replaces any earlier usable link for this account.
+        previous_requests = (
+            PasswordResetRequest.query
+            .filter_by(user_id=user.id)
+            .filter(PasswordResetRequest.status.in_(('Pending', *ACTIVE_PASSWORD_RESET_STATUSES)))
+            .with_for_update()
+            .all()
+        )
+        for previous in previous_requests:
+            previous.status = 'Expired'
+            previous.token_hash = None
+            previous.activity_log = (previous.activity_log or []) + [{
+                'event': 'superseded_by_new_request',
+                'at': now.isoformat(),
+            }]
+
     reset_request = PasswordResetRequest(  # pyre-ignore[unexpected-keyword]
         user_id=user.id if user else None,
         email=email,
         role=role,
-        status='Pending',
-        activity_log=[
-            {
-                'event': 'requested',
-                'at': datetime.utcnow().isoformat(),
-                'ip': request.remote_addr,
-                'matched_user': bool(user),
-            }
-        ],
+        status='Queued' if user else 'NoAccount',
+        token_hash=hashlib.sha256(reset_token.encode('utf-8')).hexdigest() if reset_token else None,
+        token_expires_at=now + timedelta(minutes=PASSWORD_RESET_TOKEN_TTL_MINUTES) if reset_token else None,
+        activity_log=[{
+            'event': 'requested',
+            'at': now.isoformat(),
+            'ip': request.remote_addr,
+            'matched_user': bool(user),
+        }],
     )
     db.session.add(reset_request)
     db.session.commit()
 
-    return jsonify({
-        'message': 'If this account exists, your reset request was sent to the administrator for review.'
-    }), 202
+    if user and reset_token:
+        reset_link = _password_reset_link(reset_token)
+        try:
+            queued_at = datetime.utcnow()
+            reset_request.activity_log = (reset_request.activity_log or []) + [{
+                'event': 'reset_email_queue_started',
+                'at': queued_at.isoformat(),
+                'expires_at': reset_request.token_expires_at.isoformat(),
+            }]
+            db.session.commit()
+            if not send_password_reset_email_async(
+                user.email,
+                reset_link,
+                on_complete=_password_reset_email_callback(reset_request.id),
+            ):
+                raise RuntimeError('Failed to queue password reset email')
+        except Exception as exc:
+            print(f'Failed to queue password reset email: {exc}')
+            db.session.rollback()
+            reset_request = PasswordResetRequest.query.get(reset_request.id)
+            if reset_request and reset_request.status == 'Queued':
+                reset_request.status = 'DeliveryFailed'
+                reset_request.token_hash = None
+                reset_request.token_expires_at = None
+                reset_request.activity_log = (reset_request.activity_log or []) + [{
+                    'event': 'reset_email_queue_failed',
+                    'at': datetime.utcnow().isoformat(),
+                }]
+                db.session.commit()
+
+    return _password_reset_response({'message': _password_reset_message()}, 202)
 
 
-@user_bp.route('/auth/password-reset/verify', methods=['GET'])
+@user_bp.route('/auth/password-reset/verify', methods=['GET', 'POST'])
 def verify_password_reset_token():
-    token = str(request.args.get('token') or '').strip()
+    data = request.get_json(silent=True) or {}
+    token_value = data.get('token') if request.method == 'POST' else request.args.get('token')
+    token = str(token_value or '').strip()
     if not token:
-        return jsonify({'error': 'Reset token is required'}), 400
+        return _password_reset_response({'error': 'Reset token is required'}, 400)
 
     token_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()
-    reset_request = PasswordResetRequest.query.filter_by(token_hash=token_hash, status='Approved').first()
+    reset_request = (
+        PasswordResetRequest.query
+        .filter_by(token_hash=token_hash)
+        .filter(PasswordResetRequest.status.in_(ACTIVE_PASSWORD_RESET_STATUSES))
+        .first()
+    )
     now = datetime.utcnow()
     if not reset_request or reset_request.used_at or not reset_request.token_expires_at or reset_request.token_expires_at <= now:
-        if reset_request and reset_request.status == 'Approved':
+        if reset_request:
             reset_request.status = 'Expired'
-            reset_request.activity_log = (reset_request.activity_log or []) + [{'event': 'expired_verify', 'at': now.isoformat()}]
+            reset_request.token_hash = None
+            reset_request.activity_log = (reset_request.activity_log or []) + [{
+                'event': 'expired_verify',
+                'at': now.isoformat(),
+            }]
             db.session.commit()
-        return jsonify({'error': 'This reset link is invalid or expired'}), 400
+        return _password_reset_response({'error': 'This reset link is invalid or expired'}, 400)
 
-    return jsonify({'email': reset_request.email, 'role': reset_request.role, 'expires_at': reset_request.token_expires_at.isoformat()}), 200
+    return _password_reset_response({
+        'email': reset_request.email,
+        'role': reset_request.role,
+        'expires_at': reset_request.token_expires_at.isoformat(),
+    }, 200)
 
 
 @user_bp.route('/auth/password-reset/complete', methods=['POST'])
@@ -318,32 +451,65 @@ def complete_password_reset():
     new_password = str(data.get('new_password') or '')
 
     if not token or len(new_password) < 8:
-        return jsonify({'error': 'A valid reset token and a password of at least 8 characters are required'}), 400
+        return _password_reset_response({
+            'error': 'A valid reset token and a password of at least 8 characters are required'
+        }, 400)
 
     token_hash = hashlib.sha256(token.encode('utf-8')).hexdigest()
-    reset_request = PasswordResetRequest.query.filter_by(token_hash=token_hash, status='Approved').first()
+    reset_request = (
+        PasswordResetRequest.query
+        .filter_by(token_hash=token_hash)
+        .filter(PasswordResetRequest.status.in_(ACTIVE_PASSWORD_RESET_STATUSES))
+        .with_for_update()
+        .first()
+    )
     now = datetime.utcnow()
 
     if not reset_request or reset_request.used_at or not reset_request.token_expires_at or reset_request.token_expires_at <= now:
-        if reset_request and reset_request.status == 'Approved':
+        if reset_request:
             reset_request.status = 'Expired'
-            reset_request.activity_log = (reset_request.activity_log or []) + [{'event': 'expired_complete', 'at': now.isoformat()}]
+            reset_request.token_hash = None
+            reset_request.activity_log = (reset_request.activity_log or []) + [{
+                'event': 'expired_complete',
+                'at': now.isoformat(),
+            }]
             db.session.commit()
-        return jsonify({'error': 'This reset link is invalid or expired'}), 400
+        return _password_reset_response({'error': 'This reset link is invalid or expired'}, 400)
 
     user = User.query.get(reset_request.user_id) if reset_request.user_id else None
     if not user:
-        return jsonify({'error': 'User account for this reset request no longer exists'}), 404
+        return _password_reset_response({'error': 'User account for this reset request no longer exists'}, 404)
 
     user.password_hash = generate_password_hash(new_password)
     user.must_change_password = False
     reset_request.status = 'Used'
     reset_request.used_at = now
     reset_request.token_hash = None
-    reset_request.activity_log = (reset_request.activity_log or []) + [{'event': 'password_reset_completed', 'at': now.isoformat()}]
+    reset_request.activity_log = (reset_request.activity_log or []) + [{
+        'event': 'password_reset_completed',
+        'at': now.isoformat(),
+    }]
+
+    other_requests = (
+        PasswordResetRequest.query
+        .filter(PasswordResetRequest.user_id == user.id)
+        .filter(PasswordResetRequest.id != reset_request.id)
+        .filter(PasswordResetRequest.status.in_(ACTIVE_PASSWORD_RESET_STATUSES))
+        .filter(PasswordResetRequest.token_hash.isnot(None))
+        .with_for_update()
+        .all()
+    )
+    for other_request in other_requests:
+        other_request.status = 'Expired'
+        other_request.token_hash = None
+        other_request.activity_log = (other_request.activity_log or []) + [{
+            'event': 'invalidated_by_password_reset',
+            'at': now.isoformat(),
+        }]
+
     db.session.commit()
 
-    return jsonify({'message': 'Password updated successfully. You can now log in.'}), 200
+    return _password_reset_response({'message': 'Password updated successfully. You can now log in.'}, 200)
 
 @user_bp.route('/user/profile', methods=['GET'])
 @token_required

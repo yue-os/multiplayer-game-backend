@@ -3,8 +3,6 @@ from __future__ import annotations
 import time
 import re
 import secrets
-import hashlib
-import os
 from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
@@ -16,8 +14,6 @@ from app.auth.auth_bearer import token_required
 from app.server.database import db
 from app.server.models.announcement import Announcement
 from app.server.models.user import Class, GameServer, Message, MissionProgress, PasswordResetRequest, PlaytimeLog, Quiz, QuizResult, User
-from app.server.services.email_service import send_password_reset_email_async
-from app.server.utils import get_configured_base_url
 
 
 admin_users_bp = Blueprint("admin_users", __name__)
@@ -25,7 +21,6 @@ admin_users_bp = Blueprint("admin_users", __name__)
 ALLOWED_ROLES = {"Admin", "Teacher", "Parent", "Student"}
 ROLE_BY_LOWER = {role.lower(): role for role in ALLOWED_ROLES}
 CSV_ALLOWED_ROLES = {"Teacher", "Parent", "Student"}
-PASSWORD_RESET_STATUSES = {"Approved", "Rejected"}
 
 
 def _serialize_user(user: User, class_map: dict = None, teacher_classes_map: dict = None) -> dict[str, object]:
@@ -143,12 +138,13 @@ def _serialize_password_reset_request(item: PasswordResetRequest, user_map: dict
         "user_email": item.email,
         "email": item.email,
         "role": item.role,
-        "status": item.status,
+        "status": "LegacyPending" if item.status == "Pending" else item.status,
         "request_time": item.created_at.isoformat() if item.created_at else None,
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "reviewed_at": item.reviewed_at.isoformat() if item.reviewed_at else None,
         "used_at": item.used_at.isoformat() if item.used_at else None,
         "expires_at": item.token_expires_at.isoformat() if item.token_expires_at else None,
+        "email_queued_at": next((event.get("at") for event in (item.activity_log or []) if event.get("event") == "reset_email_queue_started"), None),
         "email_sent_at": item.email_sent_at.isoformat() if item.email_sent_at else None,
         "rejected_reason": item.rejected_reason,
         "matched_user": bool(user),
@@ -158,14 +154,6 @@ def _serialize_password_reset_request(item: PasswordResetRequest, user_map: dict
     }
 
 
-def _reset_link(token: str) -> str:
-    base_url = get_configured_base_url("PASSWORD_RESET_BASE_URL", default_port=5173)
-    return f"{base_url}/reset-password?token={token}"
-
-
-def _send_reset_email(email: str, reset_link: str) -> None:
-    if not send_password_reset_email_async(email, reset_link):
-        raise RuntimeError("Failed to queue password reset email")
 
 
 def _split_name(full_name: str) -> tuple[str, str]:
@@ -201,83 +189,6 @@ def list_password_reset_requests():
     return jsonify({"requests": [_serialize_password_reset_request(item, user_map) for item in requests]}), 200
 
 
-@admin_users_bp.route("/api/admin/password-reset-requests/<int:request_id>", methods=["PATCH"])
-@token_required
-def review_password_reset_request(request_id: int):
-    if request.current_user_role != "Admin":
-        return jsonify({"error": "Unauthorized"}), 403
-
-    data = request.get_json(silent=True) or {}
-    next_status = str(data.get("status") or "").strip().title()
-    reason = str(data.get("reason") or "").strip()
-
-    if next_status not in PASSWORD_RESET_STATUSES:
-        return jsonify({"error": "status must be Approved or Rejected"}), 400
-
-    reset_request = PasswordResetRequest.query.get(request_id)
-    if reset_request is None:
-        return jsonify({"error": "Password reset request not found"}), 404
-
-    if reset_request.status != "Pending":
-        return jsonify({"error": "Only pending reset requests can be reviewed"}), 409
-
-    now = datetime.utcnow()
-    reset_request.reviewed_at = now
-    reset_request.approved_by_id = int(request.current_user_id)
-    reset_request.activity_log = (reset_request.activity_log or []) + [
-        {"event": f"admin_{next_status.lower()}", "at": now.isoformat(), "admin_id": request.current_user_id}
-    ]
-
-    if next_status == "Rejected":
-        reset_request.status = "Rejected"
-        reset_request.rejected_reason = reason or None
-        db.session.commit()
-        return jsonify({"message": "Password reset request rejected", "request": _serialize_password_reset_request(reset_request)}), 200
-
-    user = User.query.filter(func.lower(User.email) == reset_request.email.lower(), User.role == reset_request.role).first()
-    if user is None:
-        reset_request.status = "Rejected"
-        reset_request.rejected_reason = "No matching account was found for this email and role."
-        reset_request.activity_log = (reset_request.activity_log or []) + [
-            {"event": "auto_rejected_no_matching_user", "at": now.isoformat()}
-        ]
-        db.session.commit()
-        return jsonify({"error": "No matching account was found; request was rejected.", "request": _serialize_password_reset_request(reset_request)}), 404
-
-    token = secrets.token_urlsafe(32)
-    reset_request.user_id = user.id
-    reset_request.status = "Approved"
-    reset_request.token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    reset_request.token_expires_at = now + timedelta(minutes=30)
-
-    reset_link = _reset_link(token)
-    email_sent = False
-    try:
-        _send_reset_email(reset_request.email, reset_link)
-        email_sent = True
-    except Exception as exc:
-        print(f"Failed to send reset email: {exc}")
-
-    if email_sent:
-        reset_request.email_sent_at = datetime.utcnow()
-        reset_request.activity_log = (reset_request.activity_log or []) + [
-            {"event": "reset_email_sent", "at": reset_request.email_sent_at.isoformat(), "expires_at": reset_request.token_expires_at.isoformat()}
-        ]
-    else:
-        reset_request.activity_log = (reset_request.activity_log or []) + [
-            {"event": "reset_email_failed", "at": datetime.utcnow().isoformat()}
-        ]
-
-    db.session.commit()
-
-    response_payload = {
-        "message": "Password reset approved and email sent." if email_sent else "Password reset approved, but email failed to send.",
-        "request": _serialize_password_reset_request(reset_request),
-    }
-    if not email_sent:
-        response_payload["reset_link"] = reset_link
-
-    return jsonify(response_payload), 200
 
 
 def _normalize_import_row(row: dict[str, object]) -> dict[str, object]:

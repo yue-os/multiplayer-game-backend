@@ -40,7 +40,7 @@ This manual enables clients and users to:
 - Join or host a multiplayer room.
 - Understand the game interface, roles, locations, cards, health, and round flow.
 - Monitor student progress as a parent or teacher.
-- Manage users, classes, quizzes, password-reset requests, and announcements as an administrator.
+- Manage users, classes, quizzes, announcements, and review password-reset activity as an administrator.
 - Operate, update, back up, and troubleshoot the backend services.
 
 This manual describes the current implemented behavior. Deployment URLs, support contacts, production credentials, and hosting-specific procedures must be supplied by the client's system administrator.
@@ -108,7 +108,7 @@ Do not use development secrets, debug mode, default Redis passwords, or the Flas
 
 Supported roles are **Student**, **Parent**, **Teacher**, and **Admin**. A Student account must be linked to a Parent account before the student can play.
 
-To change a password, use the authenticated password-change function. To recover a password, request a reset by email; an administrator may need to approve the request before a reset link is issued.
+To change a password, use the authenticated password-change function. To recover a password, request a reset by email. If the account matches, a unique reset link is emailed and expires after 30 minutes.
 
 ### **2. Interface Overview**
 
@@ -130,7 +130,7 @@ The game client provides the following main screens and controls:
 - **Student**: Plays the game, completes missions and quizzes, and records progress.
 - **Parent**: Links children, reviews statistics, reads feedback, and communicates with connected teachers.
 - **Teacher**: Manages classes, quizzes, student performance, game lobbies, announcements, and feedback.
-- **Admin**: Manages users, classes, password-reset requests, and system-level records.
+- **Admin**: Manages users, classes, and system-level records, and can review password-reset activity.
 
 ## **III. System Features**
 
@@ -270,7 +270,7 @@ Published quizzes need valid questions. Multiple-choice questions require at lea
 
 #### **Administrator functions**
 
-Administrators manage users, classes, role assignments, password-reset approvals, and system records. Admin actions should be limited to authorized staff and recorded according to the client's privacy and retention policy.
+Administrators manage users, classes, and system records, and can review password-reset activity. Admin actions should be limited to authorized staff and recorded according to the client's privacy and retention policy.
 
 ### **6. Feature 6: Admin and Teacher Dashboard Web Application**
 
@@ -307,7 +307,7 @@ Administrators can use the dashboard to:
 - View platform analytics and summary information.
 - Create, view, update, and delete user accounts.
 - Review user roles, classes, and parent relationships.
-- Review and process password-reset requests.
+- Monitor password-reset activity; reset links are emailed automatically to matching accounts.
 - Manage administrative records using protected API requests.
 
 #### **Teacher Dashboard functions**
@@ -410,7 +410,7 @@ Redis is used for sessions, pending registration data, notifications, lobby stat
 No. Parent messages are restricted to teachers connected to the linked child's class or records.
 
 **How are password-reset requests handled?**  
-The user submits a request. An administrator reviews and approves or rejects it. Approved reset links expire and can be used once.
+The user submits an email address and, when an account matches, receives a unique reset link. The link expires after 30 minutes and can be used once. The response is the same whether or not an account matches.
 
 **Which application should administrators and teachers use?**  
 Use the Admin & Teacher Dashboard web application. Administrators sign in at `/admin`, teachers at `/teacher`, and parents at `/parent`. Students use the BatangAware game client.
@@ -452,7 +452,7 @@ For the game client, distribute the approved Android or desktop build through th
 - Review Redis persistence and memory usage.
 - Remove obsolete test accounts and stale development data according to policy.
 - Review failed email delivery and pending registrations.
-- Review admin activity and password-reset requests.
+- Review admin activity and password-reset activity.
 
 #### **Release and security checks**
 
@@ -472,13 +472,13 @@ The following baseline capabilities are included in the current system documenta
 - Godot 4 mobile-first game client with responsive game UI.
 - Multiplayer lobby hosting and room discovery.
 - JWT authentication and role-based access.
-- Email OTP registration and administrator-reviewed password recovery.
+- Email OTP registration and self-service password recovery.
 - PostgreSQL persistence for users, classes, missions, quizzes, progress, playtime, and messages.
 - Redis session and lobby-state caching.
 - FastAPI WebSocket real-time game state, round timers, location events, and trade processing.
 - Parent child-linking and statistics views.
 - Teacher class, quiz, student-performance, lobby, and feedback workflows.
-- Administrator user and password-reset management.
+- Administrator user management and password-reset activity monitoring.
 
 Future releases should record the version, release date, new features, bug fixes, database or environment changes, client compatibility notes, and rollback instructions.
 
@@ -532,7 +532,7 @@ Recommended onboarding sessions are:
 - **Player orientation**: Account setup, lobby joining, round timer, health, inventory, trading, and game completion.
 - **Parent orientation**: Linking children, reviewing progress, reading feedback, and contacting teachers.
 - **Teacher orientation**: Class management, quiz creation, student monitoring, and classroom lobby operation.
-- **Administrator orientation**: User management, password-reset approval, privacy, backups, and incident response.
+- **Administrator orientation**: User management, password-reset activity, privacy, backups, and incident response.
 - **Technical operator orientation**: Docker services, environment configuration, database and Redis checks, logs, backups, and rollback.
 
 ### **3. Community Forums**

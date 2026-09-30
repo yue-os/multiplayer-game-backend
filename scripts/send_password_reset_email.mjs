@@ -26,22 +26,22 @@ const transporter = nodemailer.createTransport({
 await transporter.sendMail({
   from: `"BatangAware Security" <${smtpUser}>`,
   to: recipientEmail,
-  subject: 'Password reset approved',
+  subject: 'Password reset',
   text: [
-    'Your password reset request was approved.',
+    'Use the secure link below to choose a new password.',
     '',
     'Open this secure link within 30 minutes to set a new password:',
     resetLink,
     '',
-    'If you did not request this, please contact your administrator immediately.',
+    'If you did not request this, please ignore this email.',
   ].join('\n'),
   html: `
     <div style="font-family:Arial,sans-serif;line-height:1.5;color:#172033">
-      <h2>Password reset approved</h2>
-      <p>Your password reset request was approved.</p>
+      <h2>Password reset requested</h2>
+      <p>Use the secure link below to choose a new password.</p>
       <p><a href="${resetLink}" style="display:inline-block;padding:10px 14px;background:#4DB6AC;color:#fff;text-decoration:none;border-radius:8px">Reset password</a></p>
       <p>This secure link expires in 30 minutes.</p>
-      <p>If you did not request this, contact your administrator immediately.</p>
+      <p>If you did not request this, ignore this email.</p>
     </div>
   `,
 })
