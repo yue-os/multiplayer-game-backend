@@ -5,6 +5,8 @@ import struct
 from datetime import datetime, timedelta, timezone
 import hashlib
 import secrets
+import threading
+import time
 from flask import Blueprint, current_app, request, jsonify, send_file
 from sqlalchemy import func
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -19,6 +21,7 @@ from app.server.services.parent_link_codes import issue_parent_link_code
 from app.server.password_policy import password_policy_error
 from app.cache.session_cache import RegistrationCache
 from app.cache.notification_cache import NotificationCache
+from app.cache.redis_client import get_redis
 from app.server.utils import get_configured_base_url
 
 user_bp = Blueprint('user', __name__)
@@ -28,6 +31,114 @@ PASSWORD_RESET_TOKEN_TTL_MINUTES = 30
 PASSWORD_RESET_REQUEST_LIMIT = 3
 PASSWORD_RESET_REQUEST_WINDOW_MINUTES = 15
 ACTIVE_PASSWORD_RESET_STATUSES = ('Queued', 'Sent', 'Approved')
+LOGIN_FAILURE_LIMIT = 5
+LOGIN_FAILURE_WINDOW_SECONDS = 10 * 60
+LOGIN_COOLDOWN_SECONDS = 60
+_login_attempt_lock = threading.Lock()
+_login_attempts: dict[str, tuple[int, float]] = {}
+_login_lockouts: dict[str, float] = {}
+
+_LOGIN_ATTEMPT_SCRIPT = """
+local ip_lock_ttl = redis.call('TTL', KEYS[3])
+local user_lock_ttl = redis.call('TTL', KEYS[4])
+if ip_lock_ttl > 0 or user_lock_ttl > 0 then
+  return math.max(ip_lock_ttl, user_lock_ttl)
+end
+if ARGV[1] == 'check' then return 0 end
+local ip_count = redis.call('INCR', KEYS[1])
+if ip_count == 1 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
+local user_count = redis.call('INCR', KEYS[2])
+if user_count == 1 then redis.call('EXPIRE', KEYS[2], ARGV[2]) end
+if ip_count >= tonumber(ARGV[3]) or user_count >= tonumber(ARGV[3]) then
+  redis.call('SET', KEYS[3], '1', 'EX', ARGV[4])
+  redis.call('SET', KEYS[4], '1', 'EX', ARGV[4])
+  return tonumber(ARGV[4])
+end
+return 0
+"""
+
+
+def _login_attempt_keys(ip_address: str, username: str) -> tuple[str, str, str, str]:
+    ip_digest = hashlib.sha256((ip_address or 'unknown').encode('utf-8')).hexdigest()
+    user_digest = hashlib.sha256(username.lower().encode('utf-8')).hexdigest()
+    return (
+        f'auth:login:failures:ip:{ip_digest}',
+        f'auth:login:failures:user:{user_digest}',
+        f'auth:login:lock:ip:{ip_digest}',
+        f'auth:login:lock:user:{user_digest}',
+    )
+
+
+def _login_cooldown(ip_address: str, username: str, *, record_failure: bool = False) -> int:
+    """Check or record a login failure; rate limit by both IP and account name."""
+    keys = _login_attempt_keys(ip_address, username)
+    redis = get_redis()
+    if redis:
+        try:
+            return int(redis.eval(
+                _LOGIN_ATTEMPT_SCRIPT,
+                len(keys),
+                *keys,
+                'record' if record_failure else 'check',
+                LOGIN_FAILURE_WINDOW_SECONDS,
+                LOGIN_FAILURE_LIMIT,
+                LOGIN_COOLDOWN_SECONDS,
+            ) or 0)
+        except Exception:
+            current_app.logger.warning('Redis login limiter unavailable; using local fallback')
+
+    now = time.monotonic()
+    ip_key, user_key, ip_lock_key, user_lock_key = keys
+    with _login_attempt_lock:
+        for key, expires_at in list(_login_lockouts.items()):
+            if expires_at <= now:
+                _login_lockouts.pop(key, None)
+        for key, (_, expires_at) in list(_login_attempts.items()):
+            if expires_at <= now:
+                _login_attempts.pop(key, None)
+
+        active_locks = [
+            _login_lockouts.get(ip_lock_key, 0),
+            _login_lockouts.get(user_lock_key, 0),
+        ]
+        remaining = max(active_locks) - now
+        if remaining > 0:
+            return max(1, int(remaining + 0.999))
+        if not record_failure:
+            return 0
+
+        window_end = now + LOGIN_FAILURE_WINDOW_SECONDS
+        counts = []
+        for key in (ip_key, user_key):
+            count, expires_at = _login_attempts.get(key, (0, window_end))
+            if expires_at <= now:
+                count = 0
+                expires_at = window_end
+            count += 1
+            _login_attempts[key] = (count, expires_at)
+            counts.append(count)
+
+        if max(counts) >= LOGIN_FAILURE_LIMIT:
+            expires_at = now + LOGIN_COOLDOWN_SECONDS
+            _login_lockouts[ip_lock_key] = expires_at
+            _login_lockouts[user_lock_key] = expires_at
+            return LOGIN_COOLDOWN_SECONDS
+        return 0
+
+
+def _clear_login_failures(ip_address: str, username: str) -> None:
+    keys = _login_attempt_keys(ip_address, username)
+    redis = get_redis()
+    if redis:
+        try:
+            redis.delete(keys[0], keys[1], keys[3])
+            return
+        except Exception:
+            current_app.logger.warning('Unable to clear Redis login failure count')
+    with _login_attempt_lock:
+        _login_attempts.pop(keys[0], None)
+        _login_attempts.pop(keys[1], None)
+        _login_lockouts.pop(keys[3], None)
 
 
 def _hash_student_refresh_token(token: str) -> str:
@@ -161,10 +272,21 @@ def verify_otp():
 
 @user_bp.route('/auth/login', methods=['POST'])
 def login():
-    data = request.json
-    username = (data.get('username') or '').strip()
-    password = data.get('password') or ''
-    print('[auth/login] username=', username)
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        data = {}
+    username = str(data.get('username') or '').strip()
+    password = str(data.get('password') or '')
+    ip_address = request.remote_addr or 'unknown'
+
+    cooldown = _login_cooldown(ip_address, username)
+    if cooldown:
+        response = jsonify({
+            'error': 'Too many failed sign-in attempts. Try again shortly.',
+            'retry_after': cooldown,
+        })
+        response.headers['Retry-After'] = str(cooldown)
+        return response, 429
 
     user = User.query.filter_by(username=username).first()
 
@@ -176,6 +298,7 @@ def login():
             password_matches = False
 
     if user and password_matches:
+        _clear_login_failures(ip_address, username)
         payload = {"access_token": _student_access_token(user)}
         if user.role == 'Student':
             payload['refresh_token'] = _new_student_refresh_token(user.id)
@@ -184,6 +307,15 @@ def login():
         payload['mustChangePassword'] = payload['must_change_password']
         payload['user'] = user.to_dict()
         return jsonify(payload), 200
+
+    cooldown = _login_cooldown(ip_address, username, record_failure=True)
+    if cooldown:
+        response = jsonify({
+            'error': 'Too many failed sign-in attempts. Try again in 60 seconds.',
+            'retry_after': cooldown,
+        })
+        response.headers['Retry-After'] = str(cooldown)
+        return response, 429
 
     return jsonify({'error': 'Invalid credentials'}), 401
 

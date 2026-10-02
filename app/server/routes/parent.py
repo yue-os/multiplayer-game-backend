@@ -279,8 +279,10 @@ def get_parent_stats():
     
     stats_list = []
     for child in children:
-        # Get playtime logs
-        playtime_logs = PlaytimeLog.query.filter_by(user_id=child.id).order_by(PlaytimeLog.date.desc()).all()
+        playtime_query = PlaytimeLog.query.filter_by(user_id=child.id)
+        playtime_count = playtime_query.count()
+        total_playtime = int(db.session.query(func.coalesce(func.sum(PlaytimeLog.duration_minutes), 0)).filter_by(user_id=child.id).scalar() or 0)
+        playtime_logs = playtime_query.order_by(PlaytimeLog.date.desc(), PlaytimeLog.id.desc()).limit(15).all()
         playtime_data = [
             {
                 'date': str(log.date),
@@ -292,7 +294,11 @@ def get_parent_stats():
         ]
         
         # Get mission progress
-        mission_progress = MissionProgress.query.filter_by(user_id=child.id).all()
+        mission_query = MissionProgress.query.filter_by(user_id=child.id)
+        mission_count = mission_query.count()
+        mission_completed_count = mission_query.filter(func.lower(MissionProgress.status) == 'completed').count()
+        mission_avg_score = float(db.session.query(func.coalesce(func.avg(MissionProgress.score), 0)).filter_by(user_id=child.id).scalar() or 0)
+        mission_progress = mission_query.order_by(MissionProgress.updated_at.desc(), MissionProgress.id.desc()).limit(15).all()
         mission_data = [
             {
                 'mission_id': mp.mission_id,
@@ -305,7 +311,10 @@ def get_parent_stats():
         ]
         
         # Get quiz results
-        quiz_results = QuizResult.query.filter_by(student_id=child.id).all()
+        quiz_query = QuizResult.query.filter_by(student_id=child.id)
+        quiz_count = quiz_query.count()
+        quiz_avg_score = float(db.session.query(func.coalesce(func.avg(QuizResult.score), 0)).filter_by(student_id=child.id).scalar() or 0)
+        quiz_results = quiz_query.order_by(QuizResult.created_at.desc(), QuizResult.id.desc()).limit(15).all()
         quiz_data = [
             {
                 'quiz_id': qr.quiz_id,
@@ -319,9 +328,8 @@ def get_parent_stats():
         # Calculate average scores
         # Older progress rows can have a NULL score despite the model default.
         # Treat those as zero so one incomplete row cannot fail the parent dashboard.
-        mission_avg = float(sum(m['score'] or 0 for m in mission_data) / len(mission_data)) if mission_data else 0.0
-        quiz_avg = float(sum(q['score'] or 0 for q in quiz_data) / len(quiz_data)) if quiz_data else 0.0
-        total_playtime = sum(log.duration_minutes or 0 for log in playtime_logs)
+        mission_avg = mission_avg_score
+        quiz_avg = quiz_avg_score
         
         stats_list.append({
             'child': child.username,
@@ -331,14 +339,75 @@ def get_parent_stats():
             'last_name': child.last_name,
             'class_id': child.class_id,
             'playtime_logs': playtime_data,
+            'playtime_logs_count': playtime_count,
             'missions': mission_data,
+            'missions_count': mission_count,
+            'missions_completed_count': mission_completed_count,
             'scores': quiz_data,
+            'scores_count': quiz_count,
             'mission_avg_score': mission_avg,
             'quiz_avg_score': quiz_avg,
             'total_playtime_minutes': total_playtime,
         })
     
     return jsonify(stats_list), 200
+
+
+@parent_bp.route('/parent/stats/records', methods=['GET'])
+@token_required
+def get_parent_stats_records():
+    guard = _parent_guard()
+    if guard:
+        return guard
+
+    try:
+        child_id = int(request.args.get('child_id', ''))
+        page = max(1, int(request.args.get('page', 1)))
+        limit = min(20, max(1, int(request.args.get('limit', 15))))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'A valid child_id, page, and limit are required.'}), 400
+
+    kind = request.args.get('kind', '').strip().lower()
+    if kind not in {'playtime', 'missions', 'scores'}:
+        return jsonify({'error': 'kind must be playtime, missions, or scores.'}), 400
+
+    parent_id = int(request.current_user_id)
+    child = User.query.filter_by(id=child_id, parent_id=parent_id, role='Student').first()
+    if not child:
+        return jsonify({'error': 'Child not found.'}), 404
+
+    offset = (page - 1) * limit
+    if kind == 'playtime':
+        query = PlaytimeLog.query.filter_by(user_id=child.id).order_by(PlaytimeLog.date.desc(), PlaytimeLog.id.desc())
+        total = query.count()
+        rows = query.offset(offset).limit(limit).all()
+        items = [{'date': str(row.date), 'minutes': row.duration_minutes, 'id': row.id, 'public_id': row.public_id} for row in rows]
+    elif kind == 'missions':
+        query = MissionProgress.query.filter_by(user_id=child.id).order_by(MissionProgress.updated_at.desc(), MissionProgress.id.desc())
+        total = query.count()
+        rows = query.offset(offset).limit(limit).all()
+        items = [{
+            'mission_id': row.mission_id,
+            'status': row.status,
+            'score': row.score,
+            'updated_at': row.updated_at.isoformat() if row.updated_at else None,
+            'public_id': row.public_id,
+        } for row in rows]
+    else:
+        query = QuizResult.query.filter_by(student_id=child.id).order_by(QuizResult.created_at.desc(), QuizResult.id.desc())
+        total = query.count()
+        rows = query.offset(offset).limit(limit).all()
+        items = [{
+            'quiz_id': row.quiz_id,
+            'score': row.score,
+            'updated_at': row.created_at.isoformat() if row.created_at else None,
+            'public_id': row.public_id,
+        } for row in rows]
+
+    return jsonify({
+        'items': items,
+        'pagination': {'page': page, 'limit': limit, 'total': total, 'pages': (total + limit - 1) // limit},
+    }), 200
 
 
 @parent_bp.route('/parent/link_child', methods=['POST'])

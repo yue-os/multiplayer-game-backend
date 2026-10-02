@@ -7,9 +7,9 @@ from datetime import datetime
 from typing import Generator
 import uuid
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, select, delete, update
+from sqlalchemy import create_engine, select, delete, update, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy import String, Integer, Boolean
@@ -183,10 +183,77 @@ def create_user(payload: AdminUserCreate, db: Session = Depends(get_db_session))
     return _serialize_user(user)
 
 
-@router.get("", response_model=list[AdminUserRead])
-def list_users(db: Session = Depends(get_db_session)) -> list[AdminUserRead]:
-    users = db.execute(select(UserRecord).order_by(UserRecord.id.asc())).scalars().all()
-    return [_serialize_user(user) for user in users]
+@router.get("")
+def list_users(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=15, ge=1, le=20),
+    role: str = Query(default=""),
+    search: str = Query(default="", max_length=120),
+    db: Session = Depends(get_db_session),
+) -> dict[str, object]:
+    query = select(UserRecord).outerjoin(Class, UserRecord.class_id == Class.id)
+    count_query = select(func.count(UserRecord.id)).select_from(UserRecord).outerjoin(Class, UserRecord.class_id == Class.id)
+    filters = []
+    if role and role != "All":
+        if role not in {item.value for item in UserRole}:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid role filter.")
+        filters.append(UserRecord.role == role)
+    if search.strip():
+        pattern = f"%{search.strip()}%"
+        filters.append(or_(
+            UserRecord.first_name.ilike(pattern),
+            UserRecord.last_name.ilike(pattern),
+            UserRecord.username.ilike(pattern),
+            UserRecord.email.ilike(pattern),
+            UserRecord.role.ilike(pattern),
+            Class.name.ilike(pattern),
+        ))
+    if filters:
+        query = query.where(*filters)
+        count_query = count_query.where(*filters)
+
+    total = int(db.execute(count_query).scalar_one() or 0)
+    users = db.execute(
+        query.order_by(UserRecord.id.asc()).offset((page - 1) * limit).limit(limit)
+    ).scalars().all()
+    class_ids = {user.class_id for user in users if user.class_id is not None}
+    class_map = {}
+    if class_ids:
+        class_map = {
+            item.id: item
+            for item in db.execute(select(Class).where(Class.id.in_(class_ids))).scalars().all()
+        }
+    teacher_ids = {user.id for user in users if user.role == UserRole.TEACHER.value}
+    teacher_classes: dict[int, list[Class]] = {}
+    if teacher_ids:
+        for classroom in db.execute(
+            select(Class).where(Class.teacher_id.in_(teacher_ids)).order_by(Class.name.asc())
+        ).scalars().all():
+            teacher_classes.setdefault(classroom.teacher_id, []).append(classroom)
+
+    rows = []
+    for user in users:
+        rows.append({
+            **_serialize_user(user).model_dump(),
+            "class_id": user.class_id,
+            "class_name": class_map[user.class_id].name if user.class_id in class_map else None,
+            "parent_id": user.parent_id,
+            "must_change_password": user.must_change_password,
+            "mustChangePassword": user.must_change_password,
+            "classes": [
+                {"id": item.id, "public_id": item.public_id, "name": item.name}
+                for item in teacher_classes.get(user.id, [])
+            ],
+        })
+    return {
+        "users": rows,
+        "pagination": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "pages": (total + limit - 1) // limit,
+        },
+    }
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_200_OK)

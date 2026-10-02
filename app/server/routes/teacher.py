@@ -621,23 +621,32 @@ def list_teacher_quizzes():
     if guard:
         return guard
     
-    # Add student submission count to each quiz
-    quiz_submissions = db.session.query(QuizResult.quiz_id, func.count(QuizResult.id).label('submission_count')) \
-        .group_by(QuizResult.quiz_id).all()
-    submission_counts = {item.quiz_id: item.submission_count for item in quiz_submissions}
-    
     teacher_id = int(request.current_user_id)
-    quizzes = (
+    page = max(1, request.args.get('page', default=1, type=int) or 1)
+    limit = min(20, max(1, request.args.get('limit', default=15, type=int) or 15))
+    quiz_query = (
         Quiz.query.filter_by(teacher_id=teacher_id)
         .order_by(Quiz.id.desc())
-        .all()
     )
+    total = quiz_query.count()
+    quizzes = quiz_query.offset((page - 1) * limit).limit(limit).all()
+    quiz_ids = [quiz.id for quiz in quizzes]
+    quiz_submissions = (
+        db.session.query(QuizResult.quiz_id, func.count(QuizResult.id).label('submission_count'))
+        .filter(QuizResult.quiz_id.in_(quiz_ids))
+        .group_by(QuizResult.quiz_id)
+        .all()
+    ) if quiz_ids else []
+    submission_counts = {item.quiz_id: item.submission_count for item in quiz_submissions}
 
     serialized_quizzes = []
     for quiz in quizzes:
         quiz.submission_count = submission_counts.get(quiz.id, 0)
         serialized_quizzes.append(_serialize_quiz(quiz))
-    return jsonify({'quizzes': serialized_quizzes}), 200
+    return jsonify({
+        'quizzes': serialized_quizzes,
+        'pagination': {'page': page, 'limit': limit, 'total': total, 'pages': (total + limit - 1) // limit},
+    }), 200
 
 
 @teacher_bp.route('/teacher/quiz/results', methods=['GET'])
@@ -674,7 +683,11 @@ def list_teacher_quiz_results():
     )
     if quiz_id is not None:
         query = query.filter(Quiz.id == quiz_id)
-    rows = query.order_by(QuizResult.updated_at.desc(), QuizResult.id.desc()).all()
+    page = max(1, request.args.get('page', default=1, type=int) or 1)
+    limit = min(20, max(1, request.args.get('limit', default=15, type=int) or 15))
+    total = query.count()
+    average_score = float(query.with_entities(func.coalesce(func.avg(QuizResult.score), 0)).scalar() or 0)
+    rows = query.order_by(QuizResult.updated_at.desc(), QuizResult.id.desc()).offset((page - 1) * limit).limit(limit).all()
 
     parent_ids = sorted({student.parent_id for _, _, student in rows if student.parent_id is not None})
     parent_map = {}
@@ -716,7 +729,12 @@ def list_teacher_quiz_results():
             }
         )
 
-    return jsonify({'quiz': _serialize_quiz(selected_quiz) if selected_quiz else None, 'results': payload}), 200
+    return jsonify({
+        'quiz': _serialize_quiz(selected_quiz) if selected_quiz else None,
+        'results': payload,
+        'summary': {'total': total, 'average_score': average_score},
+        'pagination': {'page': page, 'limit': limit, 'total': total, 'pages': (total + limit - 1) // limit},
+    }), 200
 
 
 @teacher_bp.route('/teacher/quiz/result/<int:result_id>', methods=['DELETE'])

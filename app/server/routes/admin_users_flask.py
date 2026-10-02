@@ -21,6 +21,24 @@ from app.server.password_policy import password_policy_error
 admin_users_bp = Blueprint("admin_users", __name__)
 
 
+def _pagination_args(default_limit: int = 15) -> tuple[int, int, int]:
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+        limit = min(20, max(1, int(request.args.get("limit", default_limit))))
+    except (TypeError, ValueError):
+        page, limit = 1, default_limit
+    return page, limit, (page - 1) * limit
+
+
+def _pagination_payload(page: int, limit: int, total: int) -> dict[str, int]:
+    return {
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "pages": (total + limit - 1) // limit,
+    }
+
+
 def _parse_audit_datetime(value: str | None, field_name: str) -> datetime | None:
     if not value:
         return None
@@ -262,11 +280,13 @@ def list_password_reset_requests():
     if request.current_user_role != "Admin":
         return jsonify({"error": "Unauthorized"}), 403
 
-    requests = (
+    page, limit, offset = _pagination_args()
+    query = (
         PasswordResetRequest.query
         .order_by(PasswordResetRequest.created_at.desc(), PasswordResetRequest.id.desc())
-        .all()
     )
+    total = query.count()
+    requests = query.offset(offset).limit(limit).all()
     
     user_ids = set()
     for r in requests:
@@ -277,7 +297,10 @@ def list_password_reset_requests():
     if user_ids:
         user_map = {u.id: u for u in User.query.filter(User.id.in_(user_ids)).all()}
 
-    return jsonify({"requests": [_serialize_password_reset_request(item, user_map) for item in requests]}), 200
+    return jsonify({
+        "requests": [_serialize_password_reset_request(item, user_map) for item in requests],
+        "pagination": _pagination_payload(page, limit, total),
+    }), 200
 
 
 
@@ -328,18 +351,40 @@ def get_classes():
     if request.current_user_role != "Admin":
         return jsonify({"error": "Unauthorized"}), 403
 
-    classes = Class.query.order_by(Class.name.asc()).all()
-    
-    teacher_map = {t.id: t for t in User.query.filter_by(role="Teacher").all()}
-    
-    student_map = {}
-    for s in User.query.filter_by(role="Student").filter(User.class_id.isnot(None)).all():
-        student_map.setdefault(s.class_id, []).append(s)
-        
-    for c_id in student_map:
-        student_map[c_id].sort(key=lambda x: x.id)
-
-    return jsonify([_serialize_class(classroom, teacher_map, student_map) for classroom in classes]), 200
+    page, limit, offset = _pagination_args()
+    query = Class.query.order_by(Class.name.asc(), Class.id.asc())
+    total = query.count()
+    classes = query.offset(offset).limit(limit).all()
+    class_ids = [classroom.id for classroom in classes]
+    teacher_ids = {classroom.teacher_id for classroom in classes if classroom.teacher_id}
+    teacher_map = {
+        teacher.id: teacher
+        for teacher in User.query.filter(User.id.in_(teacher_ids), User.role == "Teacher").all()
+    } if teacher_ids else {}
+    student_counts = dict(
+        db.session.query(User.class_id, func.count(User.id))
+        .filter(User.class_id.in_(class_ids), User.role == "Student")
+        .group_by(User.class_id)
+        .all()
+    ) if class_ids else {}
+    return jsonify({
+        "classes": [
+            {
+                "id": classroom.id,
+                "public_id": classroom.public_id,
+                "name": classroom.name,
+                "teacher_id": classroom.teacher_id,
+                "teacher_username": teacher_map.get(classroom.teacher_id).username if classroom.teacher_id in teacher_map else "",
+                "teacher_name": (
+                    f"{(teacher_map[classroom.teacher_id].first_name or '').strip()} { (teacher_map[classroom.teacher_id].last_name or '').strip()}".strip()
+                    if classroom.teacher_id in teacher_map else ""
+                ),
+                "student_count": int(student_counts.get(classroom.id, 0)),
+            }
+            for classroom in classes
+        ],
+        "pagination": _pagination_payload(page, limit, total),
+    }), 200
 
 
 @admin_users_bp.route("/api/admin/classes", methods=["POST"])
@@ -643,18 +688,36 @@ def list_users():
     if request.current_user_role != "Admin":
         return jsonify({"error": "Unauthorized"}), 403
 
-    users = User.query.order_by(User.id.asc()).all()
-    
-    classes = Class.query.all()
-    class_map = {c.id: c for c in classes}
+    page, limit, offset = _pagination_args()
+    query = User.query.outerjoin(Class, User.class_id == Class.id)
+    role = request.args.get("role", "").strip()
+    search = request.args.get("search", "").strip()[:120]
+    if role and role != "All":
+        if role not in ALLOWED_ROLES:
+            return jsonify({"error": "Invalid role filter."}), 400
+        query = query.filter(User.role == role)
+    if search:
+        match = f"%{search}%"
+        query = query.filter(or_(
+            User.first_name.ilike(match), User.last_name.ilike(match),
+            User.username.ilike(match), User.email.ilike(match),
+            User.role.ilike(match), Class.name.ilike(match),
+        ))
+
+    total = query.count()
+    users = query.order_by(User.id.asc()).offset(offset).limit(limit).all()
+    class_ids = {user.class_id for user in users if user.class_id is not None}
+    class_map = {item.id: item for item in Class.query.filter(Class.id.in_(class_ids)).all()} if class_ids else {}
+    teacher_ids = {user.id for user in users if user.role == "Teacher"}
     teacher_classes_map = {}
-    for c in classes:
-        if c.teacher_id:
-            teacher_classes_map.setdefault(c.teacher_id, []).append(c)
-    for t_id in teacher_classes_map:
-        teacher_classes_map[t_id].sort(key=lambda x: x.name)
-        
-    return jsonify([_serialize_user(user, class_map, teacher_classes_map) for user in users]), 200
+    if teacher_ids:
+        for classroom in Class.query.filter(Class.teacher_id.in_(teacher_ids)).order_by(Class.name.asc()).all():
+            teacher_classes_map.setdefault(classroom.teacher_id, []).append(classroom)
+
+    return jsonify({
+        "users": [_serialize_user(user, class_map, teacher_classes_map) for user in users],
+        "pagination": _pagination_payload(page, limit, total),
+    }), 200
 
 
 @admin_users_bp.route("/api/admin/users/<int:user_id>", methods=["DELETE"])
@@ -771,6 +834,73 @@ def get_class_students_by_grade_section(grade: str, section: str):
     return jsonify([_serialize_user(student) for student in students]), 200
 
 
+@admin_users_bp.route("/api/admin/classes/<int:class_id>/students", methods=["GET"])
+@token_required
+def get_class_students(class_id: int):
+    if request.current_user_role != "Admin":
+        return jsonify({"error": "Unauthorized"}), 403
+
+    classroom = db.session.get(Class, class_id)
+    if classroom is None:
+        return jsonify({"error": "Class not found."}), 404
+    page, limit, offset = _pagination_args()
+    query = User.query.filter_by(class_id=class_id, role="Student").order_by(User.first_name.asc(), User.last_name.asc(), User.id.asc())
+    total = query.count()
+    students = query.offset(offset).limit(limit).all()
+    parents = {
+        parent.id: parent
+        for parent in User.query.filter(User.id.in_({student.parent_id for student in students if student.parent_id}), User.role == "Parent").all()
+    } if any(student.parent_id for student in students) else {}
+    response = [_serialize_user(student) | {
+        "parent_name": (
+            f"{(parents[student.parent_id].first_name or '').strip()} {(parents[student.parent_id].last_name or '').strip()}".strip()
+            or parents[student.parent_id].username
+        ) if student.parent_id in parents else None,
+    } for student in students]
+    return jsonify({"students": response, "pagination": _pagination_payload(page, limit, total)}), 200
+
+
+@admin_users_bp.route("/api/admin/classes/<int:class_id>/student-ids", methods=["GET"])
+@token_required
+def get_class_student_ids(class_id: int):
+    if request.current_user_role != "Admin":
+        return jsonify({"error": "Unauthorized"}), 403
+    if db.session.get(Class, class_id) is None:
+        return jsonify({"error": "Class not found."}), 404
+    ids = [row[0] for row in db.session.query(User.id).filter_by(class_id=class_id, role="Student").all()]
+    return jsonify({"student_ids": ids}), 200
+
+
+@admin_users_bp.route("/api/admin/class-assignment/students", methods=["GET"])
+@token_required
+def get_class_assignment_students():
+    if request.current_user_role != "Admin":
+        return jsonify({"error": "Unauthorized"}), 403
+
+    page, limit, offset = _pagination_args()
+    query = User.query.outerjoin(Class, User.class_id == Class.id).filter(User.role == "Student")
+    if request.args.get("unassigned", "true").lower() in {"1", "true", "yes"}:
+        query = query.filter(User.class_id.is_(None))
+    name = request.args.get("name", "").strip()[:100]
+    grade = request.args.get("grade", "").strip()[:80]
+    section = request.args.get("section", "").strip()[:80]
+    if name:
+        match = f"%{name}%"
+        query = query.filter(or_(User.first_name.ilike(match), User.last_name.ilike(match), User.username.ilike(match)))
+    if grade:
+        query = query.filter(Class.name.ilike(f"%{grade}%"))
+    if section:
+        query = query.filter(Class.name.ilike(f"%{section}%"))
+    total = query.count()
+    students = query.order_by(User.first_name.asc(), User.last_name.asc(), User.id.asc()).offset(offset).limit(limit).all()
+    class_ids = {student.class_id for student in students if student.class_id is not None}
+    class_map = {item.id: item for item in Class.query.filter(Class.id.in_(class_ids)).all()} if class_ids else {}
+    return jsonify({
+        "students": [_serialize_user(student, class_map, {}) for student in students],
+        "pagination": _pagination_payload(page, limit, total),
+    }), 200
+
+
 @admin_users_bp.route("/api/admin/class-assignment/options", methods=["GET"])
 @token_required
 def get_class_assignment_options():
@@ -859,6 +989,10 @@ def dashboard_analytics():
     heartbeat_cutoff = time.time() - 15
 
     total_students = len(students)
+    role_counts = {
+        role: int(count)
+        for role, count in db.session.query(User.role, func.count(User.id)).group_by(User.role).all()
+    }
     active_servers = GameServer.query.filter(GameServer.last_heartbeat > heartbeat_cutoff).count()
     total_servers = GameServer.query.count()
 
@@ -867,6 +1001,7 @@ def dashboard_analytics():
             {
                 "summary": {
                     "total_students": 0,
+                    "role_counts": role_counts,
                     "active_players": 0,
                     "average_completion_rate": 0.0,
                     "average_quiz_score": 0.0,
@@ -1152,6 +1287,7 @@ def dashboard_analytics():
         {
             "summary": {
                 "total_students": total_students,
+                "role_counts": role_counts,
                 "active_players": total_active_players,
                 "average_completion_rate": average_completion_rate,
                 "average_quiz_score": average_quiz_score,
