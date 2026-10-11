@@ -43,6 +43,9 @@ class LobbyRuntime(BaseModel):
     round_duration_seconds: float = 60.0
     creator_player_id: str = ""
     started: bool = False
+    round_timer_paused: bool = False
+    round_transition_expected_players: set[str] = Field(default_factory=set)
+    round_transition_ready_players: set[str] = Field(default_factory=set)
     bot_counter: int = 0
 
 
@@ -78,6 +81,10 @@ class LobbySocketHub:
             
             lobby_runtime = LobbyRuntime(game_state=game_state, engine=GameEngine(game_state))
             self._lobbies[lobby_id] = lobby_runtime
+
+        if lobby_runtime.round_timer_paused:
+            lobby_runtime.round_transition_expected_players.add(player_id)
+            lobby_runtime.round_transition_ready_players.discard(player_id)
 
         if lobby_runtime.creator_player_id == "":
             lobby_runtime.creator_player_id = player_id
@@ -178,6 +185,42 @@ class LobbySocketHub:
         lobby_connections.pop(player_id, None)
         if not lobby_connections:
             self._cleanup_lobby(lobby_id)
+            return
+
+        runtime = self._lobbies.get(lobby_id)
+        if runtime and runtime.round_timer_paused:
+            runtime.round_transition_expected_players.discard(player_id)
+            runtime.round_transition_ready_players.discard(player_id)
+            try:
+                asyncio.get_running_loop().create_task(self._resume_round_timer_if_ready(lobby_id))
+            except RuntimeError:
+                pass
+
+    async def mark_round_transition_finished(self, lobby_id: str, player_id: str, round_number: int) -> None:
+        runtime = self._lobbies.get(lobby_id)
+        if runtime is None or not runtime.round_timer_paused:
+            return
+        if round_number != runtime.game_state.current_round:
+            return
+        if player_id not in runtime.round_transition_expected_players:
+            return
+
+        runtime.round_transition_ready_players.add(player_id)
+        await self._resume_round_timer_if_ready(lobby_id)
+
+    async def _resume_round_timer_if_ready(self, lobby_id: str) -> None:
+        runtime = self._lobbies.get(lobby_id)
+        if runtime is None or not runtime.round_timer_paused:
+            return
+        expected = runtime.round_transition_expected_players
+        if expected and not expected.issubset(runtime.round_transition_ready_players):
+            return
+
+        runtime.round_timer_paused = False
+        runtime.round_started_at = time.monotonic()
+        runtime.round_transition_expected_players.clear()
+        runtime.round_transition_ready_players.clear()
+        await self.broadcast_game_state(lobby_id)
 
     async def handle_trade(self, lobby_id: str, player_id: str, payload: dict[str, Any]) -> None:
         # Reload state from Redis first to ensure we have any players who joined via other workers
@@ -332,7 +375,10 @@ class LobbySocketHub:
         players_public = [self._public_player_payload(player) for player in runtime.game_state.players]
         now = time.monotonic()
         elapsed = max(0.0, now - runtime.round_started_at)
-        timer_left = max(0.0, runtime.round_duration_seconds - elapsed) if runtime.started else runtime.round_duration_seconds
+        if runtime.started and not runtime.round_timer_paused:
+            timer_left = max(0.0, runtime.round_duration_seconds - elapsed)
+        else:
+            timer_left = runtime.round_duration_seconds
 
         for recipient_id, recipient_socket in list(lobby_connections.items()):
             recipient = self._find_player(runtime.game_state, recipient_id)
@@ -350,6 +396,7 @@ class LobbySocketHub:
                 "server_time": time.time(),
                 "round_duration_seconds": runtime.round_duration_seconds,
                 "round_timer_left": timer_left,
+                "round_timer_paused": runtime.round_timer_paused,
                 "started": runtime.started,
                 "can_start": recipient_id == actual_creator_id,
                 "public_players": players_public,
@@ -378,6 +425,9 @@ class LobbySocketHub:
                 runtime = self._lobbies[lobby_id]
                 if not runtime.started:
                     continue
+                if runtime.round_timer_paused:
+                    await self.broadcast_game_state(lobby_id)
+                    continue
                 if time.monotonic() < runtime.round_started_at + runtime.round_duration_seconds:
                     await self.broadcast_game_state(lobby_id)
                     continue
@@ -387,6 +437,13 @@ class LobbySocketHub:
                 current_round = runtime.game_state.current_round
                 max_rounds = runtime.game_state.max_rounds
                 iteration_count += 1
+                runtime.round_timer_paused = current_round <= max_rounds
+                runtime.round_transition_expected_players = (
+                    set(self._connections.get(lobby_id, {}).keys())
+                    if runtime.round_timer_paused
+                    else set()
+                )
+                runtime.round_transition_ready_players.clear()
 
                 print(f"[Timer] Lobby {lobby_id} - Round {current_round}/{max_rounds}")
 
@@ -412,11 +469,12 @@ class LobbySocketHub:
                             "server_time": time.time(),
                             "round_duration_seconds": runtime.round_duration_seconds,
                             "round_timer_left": runtime.round_duration_seconds,
+                            "round_timer_paused": runtime.round_timer_paused,
                         },
                     },
                 )
 
-                if current_round >= max_rounds:
+                if current_round > max_rounds:
                     print(f"[Timer] Lobby {lobby_id} game over at round {current_round}. Computing scores...")
                     scores = runtime.engine.compute_scores()
                     print(f"[Timer] Lobby {lobby_id} scores computed: {scores}")
@@ -667,6 +725,15 @@ async def connect_to_lobby(websocket: WebSocket, lobby_id: str, player_token: st
                 )
             elif envelope.event == "request_trade":
                 await socket_hub.handle_trade(lobby_id, player_id, envelope.data)
+            elif envelope.event == "round_transition_finished":
+                try:
+                    round_number = int(envelope.data.get("round", 0))
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="A valid round number is required.",
+                    )
+                await socket_hub.mark_round_transition_finished(lobby_id, player_id, round_number)
             elif envelope.event == "peer_rpc":
                 target_id = envelope.data.get("target_player_id", "")
                 payload = {"event": "peer_rpc", "data": envelope.data}
@@ -695,7 +762,7 @@ async def connect_to_lobby(websocket: WebSocket, lobby_id: str, player_token: st
                         "event": "error",
                         "data": {
                             "detail": f"Unsupported event '{envelope.event}'.",
-                            "supported_events": ["start_game", "request_trade", "add_bot"],
+                            "supported_events": ["start_game", "request_trade", "add_bot", "round_transition_finished"],
                         },
                     }
                 )
