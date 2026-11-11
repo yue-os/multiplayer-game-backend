@@ -120,7 +120,7 @@ class GameEngine:
                 score -= 200
             results.append({
                 "player_id": player.player_id,
-                "display_name": player.player_id,
+                "display_name": player.display_name or player.player_id,
                 "score": score,
                 "mission_completed": player.mission_completed,
                 "health_status": player.health_status.value,

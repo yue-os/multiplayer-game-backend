@@ -157,12 +157,15 @@ def _new_student_refresh_token(user_id: int, now: datetime | None = None) -> str
 
 
 def _student_access_token(user: User) -> str:
+    full_name = f"{(user.first_name or '').strip()} {(user.last_name or '').strip()}".strip()
+    display_name = full_name or user.username
     return signJWT(
         str(user.id),
         user.role,
         {
             "profile_pic_version": user.to_dict()["profile_pic_version"],
             "parent_link_only": user.role == 'Student' and user.parent_id is None,
+            "display_name": display_name,
         },
     )["access_token"]
 

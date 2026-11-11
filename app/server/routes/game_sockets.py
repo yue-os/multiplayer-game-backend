@@ -61,6 +61,7 @@ class LobbySocketHub:
     async def connect_to_lobby(self, lobby_id: str, player_token: str, websocket: WebSocket) -> str:
         auth_payload = self._parse_player_token(player_token)
         player_id = auth_payload["player_id"]
+        display_name = auth_payload.get("display_name", "")
         visible_role = self._map_claim_role(auth_payload["role"])
         profile_pic_version = auth_payload.get("profile_pic_version", "")
 
@@ -97,6 +98,7 @@ class LobbySocketHub:
         if player_state is None:
             player_state = PlayerState(
                 player_id=player_id,
+                display_name=display_name,
                 profile_pic_version=profile_pic_version,
                 visible_role=visible_role,
                 inventory={
@@ -122,6 +124,10 @@ class LobbySocketHub:
                     patient_zero.is_carrier = True
                     print(f"[Relay] Assigned {patient_zero.player_id} ({patient_zero.visible_role}) as patient zero")
         else:
+            if display_name and (
+                not player_state.display_name or player_state.display_name == player_state.player_id
+            ):
+                player_state.display_name = display_name
             player_state.profile_pic_version = profile_pic_version
 
         # Save state to Redis and publish update
@@ -502,6 +508,16 @@ class LobbySocketHub:
 
                 print(f"[Timer] Lobby {lobby_id} - Round {current_round}/{max_rounds}")
 
+                if current_round > max_rounds:
+                    print(f"[Timer] Lobby {lobby_id} game over at round {current_round}. Computing scores...")
+                    scores = runtime.engine.compute_scores()
+                    print(f"[Timer] Lobby {lobby_id} scores computed: {scores}")
+                    await self.broadcast_game_state(lobby_id, game_over=True, scores=scores)
+                    print(f"[Timer] Lobby {lobby_id} game_over broadcast sent. Cleaning up...")
+                    self._cleanup_lobby(lobby_id)
+                    print(f"[Timer] Lobby {lobby_id} cleaned up. Timer exiting.")
+                    return
+
                 announcement = runtime.engine.rotate_event()
                 hints = self._build_event_hints(runtime.game_state.current_event)
 
@@ -528,16 +544,6 @@ class LobbySocketHub:
                         },
                     },
                 )
-
-                if current_round > max_rounds:
-                    print(f"[Timer] Lobby {lobby_id} game over at round {current_round}. Computing scores...")
-                    scores = runtime.engine.compute_scores()
-                    print(f"[Timer] Lobby {lobby_id} scores computed: {scores}")
-                    await self.broadcast_game_state(lobby_id, game_over=True, scores=scores)
-                    print(f"[Timer] Lobby {lobby_id} game_over broadcast sent. Cleaning up...")
-                    self._cleanup_lobby(lobby_id)
-                    print(f"[Timer] Lobby {lobby_id} cleaned up. Timer exiting.")
-                    return
 
                 await self.broadcast_game_state(lobby_id)
             except Exception as e:
@@ -648,6 +654,7 @@ class LobbySocketHub:
             "player_id": player_id,
             "role": role,
             "profile_pic_version": str(decoded.get("profile_pic_version", "")),
+            "display_name": str(decoded.get("display_name", "")).strip(),
         }
 
     def _get_lobby_runtime_or_raise(self, lobby_id: str) -> LobbyRuntime:
