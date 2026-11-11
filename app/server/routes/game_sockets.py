@@ -177,6 +177,61 @@ class LobbySocketHub:
             
         await self.broadcast_game_state(lobby_id)
 
+    async def kick_player(self, lobby_id: str, player_id: str, target_player_id: str) -> None:
+        cached_state = GameStateCache.load_state(lobby_id)
+        if cached_state:
+            runtime = self._get_lobby_runtime_or_raise(lobby_id)
+            runtime.game_state = GameState.model_validate(cached_state)
+            runtime.engine.game_state = runtime.game_state
+        else:
+            runtime = self._get_lobby_runtime_or_raise(lobby_id)
+
+        actual_creator_id = runtime.game_state.players[0].player_id if runtime.game_state.players else runtime.creator_player_id
+        if player_id != actual_creator_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the host can kick players.")
+        if runtime.started:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Players can only be kicked before the game starts.")
+
+        target_player_id = target_player_id.strip()
+        if not target_player_id or target_player_id == player_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Choose another player to kick.")
+
+        target = self._find_player(runtime.game_state, target_player_id)
+        if target is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="That player is no longer in the lobby.")
+
+        runtime.game_state.players.remove(target)
+        GameStateCache.save_state(lobby_id, runtime.game_state.model_dump())
+
+        kick_data = {
+            "target_player_id": target_player_id,
+            "message": "The lobby host removed you.",
+        }
+        redis_client = get_async_redis()
+        if redis_client:
+            import json
+
+            event_channel = f"lobby:{lobby_id}:events"
+            await redis_client.publish(event_channel, f"kick_player:{json.dumps(kick_data)}")
+            await redis_client.publish(event_channel, "update")
+        else:
+            await self._notify_kicked_player(lobby_id, target_player_id, kick_data["message"])
+
+        await self.broadcast_game_state(lobby_id)
+
+    async def _notify_kicked_player(self, lobby_id: str, player_id: str, message: str) -> None:
+        websocket = self._connections.get(lobby_id, {}).get(player_id)
+        if websocket is None:
+            return
+
+        try:
+            await websocket.send_json({"event": "kicked", "data": {"message": message}})
+            await websocket.close(code=4001, reason="Removed from lobby")
+        except Exception as exc:
+            print(f"[Lobby] Could not notify kicked player {player_id}: {exc}")
+        finally:
+            self.disconnect_from_lobby(lobby_id, player_id)
+
     def disconnect_from_lobby(self, lobby_id: str, player_id: str) -> None:
         lobby_connections = self._connections.get(lobby_id)
         if lobby_connections is None:
@@ -519,7 +574,19 @@ class LobbySocketHub:
                         runtime = self._lobbies.get(lobby_id)
                         if cached_state is not None and runtime is not None:
                             runtime.game_state = GameState.model_validate(cached_state)
+                            runtime.engine.game_state = runtime.game_state
                         await self.broadcast_game_state(lobby_id)
+                    elif msg_str.startswith("kick_player:"):
+                        import json
+
+                        payload = json.loads(msg_str.split(":", 1)[1])
+                        target_player_id = str(payload.get("target_player_id", ""))
+                        if target_player_id:
+                            await self._notify_kicked_player(
+                                lobby_id,
+                                target_player_id,
+                                str(payload.get("message", "The lobby host removed you.")),
+                            )
                     elif msg_str.startswith("peer_rpc:"):
                         import json
                         payload_str = msg_str.split(":", 1)[1]
@@ -723,6 +790,12 @@ async def connect_to_lobby(websocket: WebSocket, lobby_id: str, player_token: st
                     player_id,
                     str(envelope.data.get("display_name", "")),
                 )
+            elif envelope.event == "kick_player":
+                await socket_hub.kick_player(
+                    lobby_id,
+                    player_id,
+                    str(envelope.data.get("target_player_id", "")),
+                )
             elif envelope.event == "request_trade":
                 await socket_hub.handle_trade(lobby_id, player_id, envelope.data)
             elif envelope.event == "round_transition_finished":
@@ -762,7 +835,7 @@ async def connect_to_lobby(websocket: WebSocket, lobby_id: str, player_token: st
                         "event": "error",
                         "data": {
                             "detail": f"Unsupported event '{envelope.event}'.",
-                            "supported_events": ["start_game", "request_trade", "add_bot", "round_transition_finished"],
+                            "supported_events": ["start_game", "request_trade", "add_bot", "kick_player", "round_transition_finished"],
                         },
                     }
                 )
