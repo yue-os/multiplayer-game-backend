@@ -44,6 +44,9 @@ class LobbyRuntime(BaseModel):
     creator_player_id: str = ""
     started: bool = False
     round_timer_paused: bool = False
+    intro_phase_active: bool = False
+    intro_expected_players: set[str] = Field(default_factory=set)
+    intro_ready_players: set[str] = Field(default_factory=set)
     round_transition_expected_players: set[str] = Field(default_factory=set)
     round_transition_ready_players: set[str] = Field(default_factory=set)
     bot_counter: int = 0
@@ -82,7 +85,10 @@ class LobbySocketHub:
             lobby_runtime = LobbyRuntime(game_state=game_state, engine=GameEngine(game_state))
             self._lobbies[lobby_id] = lobby_runtime
 
-        if lobby_runtime.round_timer_paused:
+        if lobby_runtime.intro_phase_active:
+            lobby_runtime.intro_expected_players.add(player_id)
+            lobby_runtime.intro_ready_players.discard(player_id)
+        elif lobby_runtime.round_timer_paused:
             lobby_runtime.round_transition_expected_players.add(player_id)
             lobby_runtime.round_transition_ready_players.discard(player_id)
 
@@ -243,7 +249,14 @@ class LobbySocketHub:
             return
 
         runtime = self._lobbies.get(lobby_id)
-        if runtime and runtime.round_timer_paused:
+        if runtime and runtime.intro_phase_active:
+            runtime.intro_expected_players.discard(player_id)
+            runtime.intro_ready_players.discard(player_id)
+            try:
+                asyncio.get_running_loop().create_task(self._resume_intro_timer_if_ready(lobby_id))
+            except RuntimeError:
+                pass
+        elif runtime and runtime.round_timer_paused:
             runtime.round_transition_expected_players.discard(player_id)
             runtime.round_transition_ready_players.discard(player_id)
             try:
@@ -253,7 +266,7 @@ class LobbySocketHub:
 
     async def mark_round_transition_finished(self, lobby_id: str, player_id: str, round_number: int) -> None:
         runtime = self._lobbies.get(lobby_id)
-        if runtime is None or not runtime.round_timer_paused:
+        if runtime is None or not runtime.round_timer_paused or runtime.intro_phase_active:
             return
         if round_number != runtime.game_state.current_round:
             return
@@ -275,6 +288,32 @@ class LobbySocketHub:
         runtime.round_started_at = time.monotonic()
         runtime.round_transition_expected_players.clear()
         runtime.round_transition_ready_players.clear()
+        await self.broadcast_game_state(lobby_id)
+
+    async def mark_intro_finished(self, lobby_id: str, player_id: str) -> None:
+        runtime = self._lobbies.get(lobby_id)
+        if runtime is None or not runtime.intro_phase_active:
+            return
+        if player_id not in runtime.intro_expected_players:
+            return
+
+        runtime.intro_ready_players.add(player_id)
+        await self._resume_intro_timer_if_ready(lobby_id)
+
+    async def _resume_intro_timer_if_ready(self, lobby_id: str) -> None:
+        runtime = self._lobbies.get(lobby_id)
+        if runtime is None or not runtime.intro_phase_active:
+            return
+        expected = runtime.intro_expected_players
+        if expected and not expected.issubset(runtime.intro_ready_players):
+            await self.broadcast_game_state(lobby_id)
+            return
+
+        runtime.intro_phase_active = False
+        runtime.round_timer_paused = False
+        runtime.round_started_at = time.monotonic()
+        runtime.intro_expected_players.clear()
+        runtime.intro_ready_players.clear()
         await self.broadcast_game_state(lobby_id)
 
     async def handle_trade(self, lobby_id: str, player_id: str, payload: dict[str, Any]) -> None:
@@ -377,6 +416,10 @@ class LobbySocketHub:
             return
 
         runtime.started = True
+        runtime.intro_phase_active = True
+        runtime.round_timer_paused = True
+        runtime.intro_expected_players = set(self._connections.get(lobby_id, {}).keys())
+        runtime.intro_ready_players.clear()
         runtime.round_started_at = time.monotonic()
         runtime.timer_task = asyncio.create_task(self.start_event_timer(lobby_id))
 
@@ -453,6 +496,10 @@ class LobbySocketHub:
                 "round_timer_left": timer_left,
                 "round_timer_paused": runtime.round_timer_paused,
                 "started": runtime.started,
+                "intro_waiting": runtime.intro_phase_active,
+                "intro_ready": recipient_id in runtime.intro_ready_players,
+                "intro_ready_count": len(runtime.intro_ready_players),
+                "intro_player_count": len(runtime.intro_expected_players),
                 "can_start": recipient_id == actual_creator_id,
                 "public_players": players_public,
                 "you": self._private_player_payload(recipient),
@@ -493,6 +540,9 @@ class LobbySocketHub:
                 max_rounds = runtime.game_state.max_rounds
                 iteration_count += 1
                 runtime.round_timer_paused = current_round <= max_rounds
+                runtime.intro_phase_active = False
+                runtime.intro_expected_players.clear()
+                runtime.intro_ready_players.clear()
                 runtime.round_transition_expected_players = (
                     set(self._connections.get(lobby_id, {}).keys())
                     if runtime.round_timer_paused
@@ -807,6 +857,8 @@ async def connect_to_lobby(websocket: WebSocket, lobby_id: str, player_token: st
                         detail="A valid round number is required.",
                     )
                 await socket_hub.mark_round_transition_finished(lobby_id, player_id, round_number)
+            elif envelope.event == "intro_finished":
+                await socket_hub.mark_intro_finished(lobby_id, player_id)
             elif envelope.event == "peer_rpc":
                 target_id = envelope.data.get("target_player_id", "")
                 payload = {"event": "peer_rpc", "data": envelope.data}
@@ -835,7 +887,7 @@ async def connect_to_lobby(websocket: WebSocket, lobby_id: str, player_token: st
                         "event": "error",
                         "data": {
                             "detail": f"Unsupported event '{envelope.event}'.",
-                            "supported_events": ["start_game", "request_trade", "add_bot", "kick_player", "round_transition_finished"],
+                            "supported_events": ["start_game", "request_trade", "add_bot", "kick_player", "round_transition_finished", "intro_finished"],
                         },
                     }
                 )
