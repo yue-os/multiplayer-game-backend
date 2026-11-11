@@ -55,6 +55,7 @@ class LobbyRuntime(BaseModel):
 class LobbySocketHub:
     MIN_PLAYERS = 2
     MAX_PLAYERS = 8
+    ROUND_TRANSITION_READY_TIMEOUT_SECONDS = 10.0
 
     def __init__(self) -> None:
         self._connections: dict[str, dict[str, WebSocket]] = {}
@@ -528,7 +529,23 @@ class LobbySocketHub:
                 if not runtime.started:
                     continue
                 if runtime.round_timer_paused:
-                    await self.broadcast_game_state(lobby_id)
+                    # Keep the intro/tutorial gate strict, but don't let a missed
+                    # round-transition acknowledgement freeze the match forever.
+                    transition_wait = time.monotonic() - runtime.round_started_at
+                    if (
+                        not runtime.intro_phase_active
+                        and transition_wait >= self.ROUND_TRANSITION_READY_TIMEOUT_SECONDS
+                    ):
+                        print(
+                            f"[Timer] Lobby {lobby_id} - resuming round "
+                            f"{runtime.game_state.current_round} after transition wait timeout."
+                        )
+                        runtime.round_transition_ready_players.update(
+                            runtime.round_transition_expected_players
+                        )
+                        await self._resume_round_timer_if_ready(lobby_id)
+                    else:
+                        await self.broadcast_game_state(lobby_id)
                     continue
                 if time.monotonic() < runtime.round_started_at + runtime.round_duration_seconds:
                     await self.broadcast_game_state(lobby_id)
