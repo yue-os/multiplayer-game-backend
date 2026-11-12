@@ -109,20 +109,6 @@ class LobbySocketHub:
             )
             lobby_runtime.game_state.players.append(player_state)
             
-            # Assign initial infected player if we have enough players and no one is infected yet
-            # Never make a Doctor the infected player (doctors are immune)
-            if not any(p.is_carrier for p in lobby_runtime.game_state.players):
-                # Find non-doctor players to be patient zero
-                non_doctor_players = [
-                    p for p in lobby_runtime.game_state.players
-                    if p.visible_role != VisibleRole.DOCTOR
-                ]
-                if non_doctor_players:
-                    # Use deterministic selection based on player count for consistency
-                    import random
-                    patient_zero = non_doctor_players[0]  # First non-doctor becomes patient zero
-                    patient_zero.is_carrier = True
-                    print(f"[Relay] Assigned {patient_zero.player_id} ({patient_zero.visible_role}) as patient zero")
         else:
             if display_name and (
                 not player_state.display_name or player_state.display_name == player_state.player_id
@@ -382,9 +368,12 @@ class LobbySocketHub:
         if runtime.started:
             return
 
+        self._assign_random_roles(runtime)
+        self._assign_patient_zero(runtime)
         runtime.started = True
         runtime.round_started_at = time.monotonic()
         runtime.timer_task = asyncio.create_task(self.start_event_timer(lobby_id))
+        GameStateCache.save_state(lobby_id, runtime.game_state.model_dump())
 
         try:
             from app.server.app import app as flask_app
@@ -424,6 +413,56 @@ class LobbySocketHub:
             runtime.timer_task = asyncio.create_task(self.start_event_timer(lobby_id))
         
         await self.broadcast_game_state(lobby_id)
+
+    def _assign_patient_zero(self, runtime: LobbyRuntime) -> None:
+        if any(player.is_carrier for player in runtime.game_state.players):
+            return
+
+        non_doctor_players = [
+            player
+            for player in runtime.game_state.players
+            if player.visible_role != VisibleRole.DOCTOR
+        ]
+        if not non_doctor_players:
+            return
+
+        import secrets
+
+        patient_zero = secrets.choice(non_doctor_players)
+        patient_zero.is_carrier = True
+        print(f"[Relay] Assigned {patient_zero.player_id} ({patient_zero.visible_role}) as patient zero")
+
+    def _assign_random_roles(self, runtime: LobbyRuntime) -> None:
+        players = runtime.game_state.players
+        if not players:
+            return
+
+        import secrets
+
+        unique_roles = [
+            VisibleRole.STUDENT,
+            VisibleRole.DOCTOR,
+            VisibleRole.VENDOR,
+            VisibleRole.CARETAKER,
+            VisibleRole.GUARD,
+        ]
+        secrets.SystemRandom().shuffle(unique_roles)
+        role_slots = unique_roles[:]
+        if len(players) > len(role_slots):
+            role_slots.append(VisibleRole.STUDENT)
+        repeatable_roles = [
+            VisibleRole.DOCTOR,
+            VisibleRole.VENDOR,
+            VisibleRole.CARETAKER,
+            VisibleRole.GUARD,
+        ]
+        while len(role_slots) < len(players):
+            extra_roles = repeatable_roles[:]
+            secrets.SystemRandom().shuffle(extra_roles)
+            role_slots.extend(extra_roles)
+
+        for player, role in zip(players, role_slots):
+            player.visible_role = role
 
     async def broadcast_game_state(self, lobby_id: str, game_over: bool = False, scores: list[dict] | None = None) -> None:
         # We removed the GameStateCache.load_state here to prevent overwriting active memory!
