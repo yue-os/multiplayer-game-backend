@@ -430,6 +430,7 @@ class LobbySocketHub:
 
         patient_zero = secrets.choice(non_doctor_players)
         patient_zero.is_carrier = True
+        print(f"{patient_zero.display_name or patient_zero.player_id} is Infected (cover: {patient_zero.visible_role.value})")
         print(f"[Relay] Assigned {patient_zero.player_id} ({patient_zero.visible_role}) as patient zero")
 
     def _assign_random_roles(self, runtime: LobbyRuntime) -> None:
@@ -463,6 +464,7 @@ class LobbySocketHub:
 
         for player, role in zip(players, role_slots):
             player.visible_role = role
+            print(f"{player.display_name or player.player_id} is {role.value}")
 
     async def broadcast_game_state(self, lobby_id: str, game_over: bool = False, scores: list[dict] | None = None) -> None:
         # We removed the GameStateCache.load_state here to prevent overwriting active memory!
